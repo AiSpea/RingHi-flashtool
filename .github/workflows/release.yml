@@ -54,10 +54,19 @@ jobs:
           merge-multiple: true
       - run: node scripts/make-update-manifest.cjs dist
       - name: Create complete draft release
+        id: create
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.pkg dist/*.exe dist/ringhi-update.json --draft --verify-tag --title "RingHi $GITHUB_REF_NAME" --notes-file release-notes.txt
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            echo "Release already exists; leave existing assets unchanged."
+            exit 0
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/*.pkg dist/*.exe dist/ringhi-update.json --draft --verify-tag --title "RingHi $GITHUB_REF_NAME" --notes-file release-notes.txt
+          echo "created=true" >> "$GITHUB_OUTPUT"
       - name: Publish after all assets are uploaded
+        if: steps.create.outputs.created == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
