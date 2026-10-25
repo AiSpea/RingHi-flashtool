@@ -1,0 +1,13 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {MlBatchFlasher} from '../renderer/ml-batch.mjs';
+import {parsePackage} from '../renderer/upstream/ml307h/package.mjs';
+import {packageFixture} from './ml307h-fixtures.mjs';
+const enc=new TextEncoder();
+function fixture({rejectBackup=false,failBurn=false}={}){const calls=[];const open=async(lease,mode)=>{calls.push(`${lease}:open:${mode}`);let command;return {lease,queue:{clear(){}},async write(b){command=new TextDecoder().decode(b).trim();calls.push(`${lease}:${command}`);},async read(){if(command==='AT^AUTODL')throw Error('runtime detached');return enc.encode(command==='AT+CGMR'?'test0817 v1.2.3\r\nOK\r\n':command==='AT+CGSN=1'?'123456789012345\r\nOK\r\n':'OK\r\n');},async close(){calls.push(`${lease}:close:${mode}`);}};};
+ const createSession=async(_root,_pkg,identity)=>{calls.push('backup-created');if(rejectBackup)throw Error('disk full');return {name:'unique-backup',identity:{...identity,preparationId:'unique'},store:{state:{},async rejectPreparation(){}}};};
+ const burnDevice=async(dl,_pkg,store)=>{calls.push(`${dl.transport.lease}:burn`);if(failBurn)throw Error('protocol failure');store.state.phase='awaiting-verification';return {uid:'07'.repeat(16)};};
+ return {calls,flasher:new MlBatchFlasher({open,createSession,burnDevice})};
+}
+test('ML batch persists backup binding before AUTODL and opens only its leased download branch',async()=>{const {flasher,calls}=fixture();const pkg=await parsePackage(packageFixture());await flasher.probe('board-one',pkg);const result=await flasher.flash({backup:{},firmwareName:'ringhi.pkg',beforeSwitch:async details=>{assert.equal(details.backup,'unique-backup');calls.push('journal');}});assert(calls.indexOf('journal')<calls.indexOf('board-one:AT^AUTODL'));assert(calls.indexOf('board-one:close:runtime')<calls.indexOf('board-one:open:download'));assert.equal(result.verification,'protocol-ack');assert.equal(result.reset,'requested');});
+test('ML backup failure cannot send download command',async()=>{const {flasher,calls}=fixture({rejectBackup:true});await flasher.probe('board-one',await parsePackage(packageFixture()));await assert.rejects(flasher.flash({backup:{},firmwareName:'a.pkg'}),/disk full/);assert(!calls.includes('board-one:AT^AUTODL'));});
+test('ML failure preserves recovery directory and always releases native connection',async()=>{const {flasher,calls}=fixture({failBurn:true});await flasher.probe('board-one',await parsePackage(packageFixture()));await assert.rejects(flasher.flash({backup:{},firmwareName:'a.pkg'}),e=>e.details.backup==='unique-backup');assert(calls.includes('board-one:close:download'));});

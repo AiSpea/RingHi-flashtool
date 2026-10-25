@@ -1,0 +1,63 @@
+name: Build and release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            command: build:win
+            asset: '*.exe'
+          - os: macos-latest
+            command: build:mac
+            asset: '*.pkg'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Check tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: node -e "if(process.env.GITHUB_REF_NAME!=='v'+require('./package.json').version)process.exit(1)"
+      - run: npm run ${{ matrix.command }} -- --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.os }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - run: node scripts/make-update-manifest.cjs dist
+      - name: Create complete draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.pkg dist/*.exe dist/ringhi-update.json --draft --verify-tag --title "RingHi $GITHUB_REF_NAME" --notes-file release-notes.txt
+      - name: Publish after all assets are uploaded
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest

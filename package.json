@@ -1,0 +1,82 @@
+{
+  "name": "ringhi-flasher",
+  "version": "0.3.19",
+  "private": true,
+  "description": "RingHi dual-chip firmware and production workstation",
+  "author": "AiSpea",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.mjs tests/*.test.cjs",
+    "smoke": "electron . --smoke-test",
+    "build:win": "electron-builder --win --x64",
+    "build:mac": "electron-builder --mac --arm64",
+    "test:ui": "node scripts/ui-test.cjs",
+    "build:win:folder": "electron-builder --win --x64 --dir",
+    "test:batch": "node scripts/batch-ui-test.cjs",
+    "native:check": "node scripts/native-check.cjs"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "26.15.3",
+    "playwright": "1.64.1"
+  },
+  "build": {
+    "appId": "com.aispea.ringhi.flasher",
+    "productName": "RingHi Flasher",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "desktop/**",
+      "renderer/**",
+      "core/**",
+      "package.json",
+      "docs/**"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "icon": "renderer/assets/ringhi.ico",
+      "signExecutable": false
+    },
+    "portable": {
+      "artifactName": "RingHi-Flasher-${version}-Windows-${arch}.${ext}"
+    },
+    "mac": {
+      "target": [
+        "pkg"
+      ],
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "artifactName": "RingHi-Flasher-${version}-macOS-${arch}.${ext}"
+    },
+    "npmRebuild": false,
+    "asarUnpack": [
+      "node_modules/usb/prebuilds/**",
+      "node_modules/@serialport/bindings-cpp/prebuilds/**",
+      "desktop/native/windows-ports.ps1"
+    ],
+    "pkg": {
+      "artifactName": "RingHi-Flasher-${version}-macOS-${arch}.${ext}",
+      "installLocation": "/Applications",
+      "isRelocatable": false,
+      "isVersionChecked": true,
+      "hasStrictIdentifier": true,
+      "overwriteAction": "upgrade",
+      "allowAnywhere": false,
+      "allowCurrentUserHome": false,
+      "allowRootDirectory": true,
+      "scripts": "pkg-scripts",
+      "welcome": "installer-welcome.txt",
+      "conclusion": "installer-conclusion.txt"
+    }
+  },
+  "dependencies": {
+    "plist": "5.0.0",
+    "serialport": "13.0.0",
+    "usb": "2.19.1"
+  }
+}

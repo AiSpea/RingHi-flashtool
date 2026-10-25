@@ -1,0 +1,5 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {resetEsp} from '../renderer/esp-reset.mjs';
+const transport={device:{getInfo:()=>({usbVendorId:0x303a,usbProductId:0x1001})}};
+test('S3 native USB reset uses only volatile RTC registers and preserves unrelated boot flags',async()=>{const calls=[];await resetEsp({chip:{CHIP_NAME:'ESP32-S3'},writeReg:async(...args)=>calls.push(args)},transport,async ms=>calls.push(['sleep',ms]));assert.deepEqual(calls,[[0x6000812c,0,1],[0x600080b0,0x50d83aa1],[0x6000809c,2000],[0x60008098,0xd0000102],[0x600080b0,0],['sleep',500]]);});
+test('other chips and USB-UART retain their reset strategy',async()=>{let calls=0;await resetEsp({chip:{CHIP_NAME:'ESP32-C3'},after:async()=>calls++},transport);await resetEsp({chip:{CHIP_NAME:'ESP32-S3'},after:async()=>calls++},{device:{getInfo:()=>({usbVendorId:0x10c4,usbProductId:0xea60})}});assert.equal(calls,2);});
+test('reset protocol failure stops without retry or false success',async()=>{let calls=0;await assert.rejects(resetEsp({chip:{CHIP_NAME:'ESP32-S3'},writeReg:async()=>{calls++;throw Error('USB lost');}},transport),/USB lost/);assert.equal(calls,1);});

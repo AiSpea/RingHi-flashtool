@@ -1,0 +1,2 @@
+const test=require('node:test'),assert=require('node:assert/strict');const {cleanProduction}=require('../desktop/production-record.cjs');
+test('production evidence retains results, strips unknown credential fields, bounds lengths',()=>{const p=cleanProduction({state:'passed',reason:'ok',cloudRegistered:false,report:{secret:'do-not-save'},deviceIdentity:'secret',checks:[{id:'sim',status:'passed',detail:'x'.repeat(9999),secret:'secret'}]});assert.equal(p.cloudRegistered,false);assert.equal(p.checks[0].detail.length,512);assert(!JSON.stringify(p).includes('secret'));});

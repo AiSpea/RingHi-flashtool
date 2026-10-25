@@ -1,0 +1,11 @@
+RingHi Flasher 安装与更新
+
+应用将固定安装到：/Applications/RingHi Flasher.app
+已有版本将被覆盖更新，不会新增一个版本图标。
+
+开始前，请停止批量接收、等待当前设备烧录完成，并退出所有 RingHi Flasher 窗口。安装器不会强制结束烧录进程。
+
+生产记录及你选择的 ML307H 备份目录均会保留。
+旧 ZIP 解压的副本不再作为启动入口，请只使用“应用程序”中的 RingHi Flasher。
+
+这是 Apple Silicon 测试版，未进行 Developer ID 签名和公证。

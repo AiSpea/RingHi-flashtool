@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>ML307H 固件烧录 · InfinLab Toolbox</title><link rel="stylesheet" href="./ml307h-flash.css"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=1">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=1">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=1">
+</head>
+<body><header><a href="/">← InfinLab Toolbox</a><nav aria-label="相关工具"><a href="/tools/ml307h-log/">打开日志工具 ↗</a><span class="badge">文件只在本机处理</span></nav></header>
+<main><div class="heading"><div><p class="eyebrow">ML307H / FIRMWARE</p><h1>固件下载工作台</h1><p>选好固件与备份总目录，连接设备，一键完成下载。</p></div><span class="badge">支持连续烧录</span></div>
+<div class="configuration">
+<section class="panel config-card"><p class="eyebrow">01 / 固件</p><h2>本次下载的固件</h2><p id="file-name" class="selection">未选择固件</p><label class="field">选择或更换 .pkg<input id="package" type="file" accept=".pkg,application/octet-stream"></label><p id="package-status" class="hint">尚未选择固件</p><p id="compatibility" class="hint" role="status">适配状态：等待固件。</p><p class="hint">烧录完成后可直接换包，无需刷新。最大 64 MiB。</p></section>
+<section class="panel config-card"><p class="eyebrow">02 / 备份位置</p><h2>备份总目录</h2><p id="folder-name" class="selection">未选择</p><button id="directory" class="secondary">选择备份总目录</button><p class="hint">本页面选一次即可复用。每次下载自动新建独立文件夹，不覆盖旧备份。</p><p id="backup" class="hint">备份与烧录记录保存在电脑上，不上传服务器。</p></section>
+<section class="panel config-card"><p class="eyebrow">03 / 设备</p><h2>目标设备</h2><label class="field">连接方式<select id="at-transport"><option value="usb">USB · 原生接口（Mac 推荐）</option><option value="serial">串口 · 系统 AT 端口</option></select></label><div class="actions"><button id="connect-at" class="secondary">连接设备</button><button id="release" class="quiet">释放连接</button></div><p id="identity" class="hint">未连接。只连接一台 ML307H，并关闭占用端口的其他工具。</p><p class="hint">切换模式后自动重连已授权的下载设备。</p></section>
+</div>
+<section class="panel workbench" aria-labelledby="guide-title">
+<div class="confirmation"><label class="check"><input id="consent" type="checkbox">我已确认所选固件适用于当前硬件，电脑只连接这一台目标设备，并同意保留本次备份。</label><p class="hint">烧录前，请自行确认所选固件适用于当前设备的硬件型号和版本。</p></div>
+<div class="guide"><div><p class="eyebrow">下载任务</p><h2 id="guide-title">选择固件</h2><p id="next-hint" role="status" aria-live="polite">选择固件后查看检查结果。</p></div><div class="actions"><button id="next-action">选择 .pkg 固件</button><button id="prepare" aria-describedby="prepare-reason" disabled>开始下载</button><button id="flash" disabled hidden>手动选择下载设备</button><button id="reflash" class="secondary" hidden>准备下一次下载</button><button id="check-previous" class="secondary" hidden>核对上次结果（可选）</button></div></div>
+<p id="prepare-reason" class="hint" role="status"></p>
+<div id="message" class="notice" role="status" aria-live="polite">选择 .pkg 固件开始。固件和设备数据只在本机处理。</div>
+<ol id="checklist" aria-label="烧录准备与进度"></ol>
+<div class="table-wrap task-table"><table><thead><tr><th>设备 / UID</th><th>固件</th><th>阶段</th><th>进度</th><th>耗时</th></tr></thead><tbody><tr><td id="task-device">未连接</td><td id="task-firmware">—</td><td><strong id="state">待准备</strong><p id="phase" class="hint">等待开始下载</p></td><td class="progress-cell"><progress id="progress" max="100" value="0" aria-label="当前分区烧录进度"></progress><output id="progress-text">等待开始</output></td><td id="elapsed">—</td></tr></tbody></table></div>
+<p class="hint run-note">下载会自动完成模式切换、连接、备份、写入和重启。完成前请保持 USB 和页面连接。首次授权下载设备时，按提示选择一次即可继续。</p>
+<div id="verify-panel" class="completion"><button id="verify" class="secondary" disabled>核对启动结果（可选）</button><span id="verify-hint" class="hint">完成后可更换固件继续下载，或打开日志工具查看启动。</span><button id="report" class="quiet">导出操作记录</button></div>
+</section>
+<section id="history-panel" class="panel" hidden><h2>本页已完成任务</h2><div class="table-wrap"><table><thead><tr><th>固件</th><th>结果</th><th>耗时</th><th>备份文件夹</th></tr></thead><tbody id="history"></tbody></table></div><p class="hint">仅保留本页最近 20 条；刷新清空列表，本机备份继续保留。</p></section>
+<div class="details-grid">
+<details class="panel" id="advanced"><summary>下载选项与中断恢复</summary><label class="field">操作方式<select id="flash-mode"><option value="quick" selected>快捷下载 · 自行确认硬件</option><option value="checked">核对下载 · 自动检查设备</option></select></label><p id="mode-hint" class="hint"></p><details id="checks-details"><summary>可选检查</summary><label class="check"><input id="check-board" type="checkbox">核对设备板型（读取版本和 IMEI）</label><label class="check"><input id="check-reread" type="checkbox">下载前再次核对 IMEI</label><label class="check"><input id="check-usb" type="checkbox">核对跨模式 USB 序列号</label><p class="hint">始终保留固件完整性、分区边界、端口占用、备份落盘校验和恢复 UID 核对。</p></details><h3>恢复已有备份</h3><p class="hint">中断后使用原固件、原设备和原会话目录（内含 preparation.json）继续。已开始的下载不能更换固件。使用过的 loader 需按硬件恢复流程回到 ROM。</p><button id="recovery-directory" class="secondary">恢复／核对已有备份</button><label class="field">导入本机会话记录（高级）<input id="recovery" type="file" accept=".json"></label><p id="support" class="hint">正在检测浏览器能力…</p><p class="hint">本页执行普通固件下载，不执行授权功能激活。授权查询请使用 <a href="/tools/ml307h-account/" target="_blank" rel="noopener">ML307H 账号与授权</a>；设备激活还需官方账号及已登记的 PC。浏览器对运行模式和下载模式分别授权。</p></details>
+<details class="panel"><summary>固件信息与分区计划</summary><dl><dt>固件版本</dt><dd id="version">—</dd><dt>文件 SHA-256</dt><dd id="digest" class="mono">—</dd></dl><div class="table-wrap"><table><thead><tr><th>分区</th><th>镜像大小</th><th>操作</th></tr></thead><tbody id="partitions"><tr><td colspan="3">选择固件后显示</td></tr></tbody></table></div><p class="hint">校准和工厂数据属于这台设备，自动备份后恢复至同一设备。无需导入板型 JSON，不提供全片擦除。</p></details>
+</div>
+<details class="panel"><summary>详细操作日志</summary><pre id="console" tabindex="0" aria-label="操作日志">等待操作</pre></details>
+</main><script type="module" src="./ml307h-flash.js"></script></body></html>

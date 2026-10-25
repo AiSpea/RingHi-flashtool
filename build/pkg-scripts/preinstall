@@ -1,0 +1,9 @@
+#!/bin/sh
+# Never terminate a flasher from an installer: even an older copy may own hardware.
+set -eu
+processes=$(/bin/ps -axo comm=) || exit 1
+if printf '%s\n' "$processes" | /usr/bin/grep -Eq '/Contents/MacOS/RingHi Flasher$'; then
+  echo 'RingHi Flasher is running. Stop intake, wait for flashing to finish, quit all copies, then run this installer again.' >&2
+  exit 1
+fi
+exit 0
