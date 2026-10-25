@@ -1,0 +1,8 @@
+const {test}=require('node:test'),assert=require('node:assert/strict');
+const {EventEmitter}=require('node:events'),{Readable}=require('node:stream');
+const {updateFetch}=require('../desktop/update-network.cjs');
+function network(run){let options;const request=new EventEmitter();request.end=()=>queueMicrotask(()=>run(request));request.abort=()=>request.emit('close');return {net:{request(o){options=o;return request;}},options:()=>options,request};}
+test('Electron manual redirect returns location despite Chromium cancellation',async()=>{const n=network(r=>{r.emit('redirect',302,'GET','https://github.com/next');r.emit('error',Error('Redirect was cancelled'));r.emit('close');});const r=await updateFetch(n.net,'https://github.com/start');assert.equal(r.status,302);assert.equal(r.headers.get('location'),'https://github.com/next');assert.equal(n.options().credentials,'omit');assert.equal(n.options().redirect,'manual');});
+test('Electron response streams bytes and headers',async()=>{const n=network(r=>{const stream=Readable.from([Buffer.from('package')]);stream.statusCode=200;stream.headers={'content-length':['7']};r.emit('response',stream);});const r=await updateFetch(n.net,'https://github.com/package');assert.equal(r.headers.get('content-length'),'7');assert.equal(await r.text(),'package');});
+test('aborted request rejects without waiting for network',async()=>{const n=network(()=>{}),c=new AbortController();c.abort(Error('stop'));await assert.rejects(updateFetch(n.net,'https://github.com/package',{signal:c.signal}),/stop/);});
+test('network errors surface rather than reporting no update',async()=>{const n=network(r=>r.emit('error',Error('offline')));await assert.rejects(updateFetch(n.net,'https://github.com/package'),/offline/);});

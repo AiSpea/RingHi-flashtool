@@ -111,7 +111,7 @@ if(!app.requestSingleInstanceLock()&&!smoke)app.quit();else app.whenReady().then
   }
   throw Error('无效批次记录操作');
  }catch(e){return {ok:false,error:e.message};}});
- updater=new UpdateService({directory:path.join(app.getPath('userData'),'updates'),currentVersion:app.getVersion(),enabled:app.isPackaged&&!smoke&&!process.argv.includes('--test-session'),isBusy:updateBusy,fetchImpl:(...args)=>net.fetch(...args),onChange:state=>{if(win&&!win.isDestroyed())win.webContents.send('update-state',state);}});
+ updater=new UpdateService({directory:path.join(app.getPath('userData'),'updates'),currentVersion:app.getVersion(),enabled:app.isPackaged&&!smoke&&!process.argv.includes('--test-session'),isBusy:updateBusy,fetchImpl:(...args)=>require('./update-network.cjs').updateFetch(net,...args),onChange:state=>{if(win&&!win.isDestroyed())win.webContents.send('update-state',state);}});
  ipcMain.handle('app-update',async(event,action)=>{check(event);try{
   if(action==='status')return {ok:true,data:updater.snapshot()};
   if(action==='check')return {ok:true,data:await updater.check()};
