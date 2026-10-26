@@ -275,6 +275,7 @@ class Window(QMainWindow):
         self.prepared_cfg = None
         self.update_info = None
         self.update_stage = None
+        self.updating = False
         self.bus = Bus()
         self.bus.done.connect(self.job_done)
         self.bus.notice.connect(self.set_notice)
@@ -816,7 +817,7 @@ class Window(QMainWindow):
                 self.error(e)
 
     def start_batch(self):
-        if self.preparing or self.closing:
+        if self.preparing or self.closing or self.updating:
             return
         if self.batch and (self.batch.busy or self.batch.accepting):
             self.error("请先暂停接收并等待任务完成")
@@ -917,6 +918,8 @@ class Window(QMainWindow):
             self.set_notice("已暂停接收；正在执行的任务继续完成。可点击“继续接收”。")
 
     def resume(self):
+        if self.updating or self.closing:
+            return
         if self.batch:
             try:
                 self.batch.resume()
@@ -1003,12 +1006,16 @@ class Window(QMainWindow):
             self.passive_scan()
         busy = self.batch and self.batch.busy
         accepting = self.batch and self.batch.accepting
-        locked = bool(busy or accepting or self.preparing or self.closing)
+        locked = bool(
+            busy or accepting or self.preparing or self.closing or self.updating
+        )
         self.config.setEnabled(not locked)
         self.start_button.setEnabled(not locked)
         self.pause_button.setEnabled(bool(accepting) and not self.closing)
         self.resume_button.setEnabled(
-            bool(self.batch and not accepting and not self.closing)
+            bool(
+                self.batch and not accepting and not self.closing and not self.updating
+            )
         )
         self.export_button.setEnabled(self.batch is not None)
         rows = self.batch.snapshots() if self.batch else self.passive
@@ -1123,7 +1130,7 @@ class Window(QMainWindow):
                 self.records.setItem(i, col, QTableWidgetItem(value))
 
     def check_updates(self):
-        if self.test or self.closing:
+        if self.test or self.closing or self.updating:
             return
         self.update_label.setText("正在检查更新…")
 
@@ -1147,12 +1154,27 @@ class Window(QMainWindow):
         )
 
     def update_clicked(self):
+        if self.updating or self.closing:
+            return
         if not self.update_info:
             self.check_updates()
             return
         if self.preparing or self.batch and (self.batch.busy or self.batch.accepting):
             self.error("请先暂停接收并等待任务结束，再更新")
             return
+        if (
+            QMessageBox.question(
+                self,
+                "更新 RingHi",
+                "下载并校验后会保存 CSV、退出安装并自动重新打开。账号、配置和记录保留，无需重启电脑。\n现在更新？",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Yes,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        self.updating = True
+        self.tick()
         self.update_button.setEnabled(False)
         self.set_notice("正在下载并校验更新包…")
 
@@ -1163,10 +1185,21 @@ class Window(QMainWindow):
         self.background(
             lambda: updates.download(self.update_info),
             ready,
-            lambda e: (self.update_button.setEnabled(True), self.error(e)),
+            self.update_failed,
         )
 
+    def update_failed(self, error):
+        self.updating = False
+        self.update_stage = None
+        self.update_button.setEnabled(True)
+        self.error(error)
+        self.tick()
+
     def closeEvent(self, event):
+        if self.updating and self.update_stage is None:
+            self.set_notice("正在下载并校验更新，完成后会自动保存并重新打开…")
+            event.ignore()
+            return
         if self.allow_close:
             if self.update_stage:
                 try:
@@ -1174,7 +1207,7 @@ class Window(QMainWindow):
                 except Exception as e:
                     self.allow_close = False
                     self.closing = False
-                    self.error(e)
+                    self.update_failed(e)
                     event.ignore()
                     return
             event.accept()
@@ -1206,10 +1239,10 @@ class Window(QMainWindow):
                 self.save_settings()
             except Exception as e:
                 self.closing = False
-                self.error("设置保存失败：" + str(e))
+                self.update_failed("设置保存失败：" + str(e))
 
         def failed(e):
             self.closing = False
-            self.error("CSV 未保存成功，窗口保留。请导出后再关闭：" + str(e))
+            self.update_failed("CSV 未保存成功，窗口保留。请导出后再关闭：" + str(e))
 
         self.background(finish, done, failed)

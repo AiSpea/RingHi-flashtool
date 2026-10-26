@@ -1,6 +1,6 @@
 """Public release checks; only Python-native bundles are eligible for replacement."""
 
-import hashlib, os, re, sys, tempfile, zipfile, subprocess
+import hashlib, os, re, sys, tempfile, zipfile, subprocess, time
 from pathlib import Path
 from urllib.parse import urlparse
 import requests
@@ -46,11 +46,14 @@ def _check(session):
     if version(release.get("tag_name", "")) <= version(__version__):
         return None
     assets = release.get("assets", [])
+    release_version = release["tag_name"].lstrip("v")
+    # Select only this exact release's Windows-native installer. ZIP remains
+    # published for 0.5.5 and older clients that cannot consume EXE installers.
     asset = next(
         (
             a
             for a in assets
-            if re.fullmatch(r"RingHi-Python-\d+\.\d+\.\d+-win-x64\.zip", a["name"])
+            if a["name"] == f"RingHi-Setup-{release_version}-win-x64.exe"
         ),
         None,
     )
@@ -73,6 +76,13 @@ def download(info):
 
 
 def _download(info, session):
+    if not all(allowed(info[k]["browser_download_url"]) for k in ("asset", "hashes")):
+        raise ValueError("更新资产来源不符合预期")
+    if not re.fullmatch(
+        r"RingHi-(?:Setup-\d+\.\d+\.\d+-win-x64\.exe|Python-\d+\.\d+\.\d+-win-x64\.zip)",
+        info["asset"]["name"],
+    ):
+        raise ValueError("更新包名称无效")
     sums = session.get(info["hashes"]["browser_download_url"], timeout=(8, 30))
     sums.raise_for_status()
     if len(sums.content) > 65536:
@@ -104,6 +114,10 @@ def _download(info, session):
                 f.write(part)
     if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
         raise ValueError("更新包 SHA-256 不匹配")
+    if name.endswith(".exe"):
+        if archive.read_bytes()[:2] != b"MZ":
+            raise ValueError("更新包不是 Windows 安装程序")
+        return archive
     target = folder / "unpacked"
     target.mkdir()
     with zipfile.ZipFile(archive) as z:
@@ -123,42 +137,72 @@ def _download(info, session):
     return exe[0].parent
 
 
+def installer_script(installer, dest, pid, ready, log):
+    def quote(value):
+        return "'" + str(value).replace("'", "''") + "'"
+
+    digest = hashlib.sha256(Path(installer).read_bytes()).hexdigest()
+    return f"""$ErrorActionPreference='Stop'
+$src={quote(installer)}
+$dst={quote(dest)}
+$log={quote(log)}
+try {{
+ $parent=Get-Process -Id {pid} -ErrorAction SilentlyContinue
+ [IO.File]::WriteAllText({quote(ready)}, 'ready')
+ if($parent -and -not $parent.WaitForExit(300000)){{throw 'RingHi has not finished saving. Update cancelled.'}}
+ if((Get-FileHash $src -Algorithm SHA256).Hash.ToLower() -ne '{digest}'){{throw 'Installer checksum changed'}}
+ $env:PYINSTALLER_RESET_ENVIRONMENT='1'
+ $arguments=@('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/DIR="'+$dst+'"'),('/LOG="'+$log+'"'))
+ $setup=Start-Process -FilePath $src -ArgumentList $arguments -PassThru -Wait
+ if($setup.ExitCode -ne 0){{throw ('Installer failed: '+$setup.ExitCode)}}
+ Start-Process -FilePath ($dst+'/RingHi.exe') -WorkingDirectory $dst
+}} catch {{
+ Add-Content -LiteralPath $log -Value $_.Exception.Message
+ Add-Type -AssemblyName PresentationFramework
+ [System.Windows.MessageBox]::Show('RingHi update did not complete. Open RingHi again or run the downloaded installer. Log: '+$log,'RingHi')|Out-Null
+}}
+"""
+
+
 def launch_replace(staged):
     if not getattr(sys, "frozen", False):
         raise ValueError("请在安装后的应用中更新")
     dest = Path(sys.executable).parent
-    if str(dest).startswith(str(Path(tempfile.gettempdir()))):
+    if dest.resolve().is_relative_to(Path(tempfile.gettempdir()).resolve()):
         raise ValueError("请将应用安装到固定目录后更新")
-
-    def quote(v):
-        return "'" + str(v).replace("'", "''") + "'"
-
-    script = Path(tempfile.mkdtemp(prefix="RingHi-install-")) / "replace.ps1"
-    body = f"""$ErrorActionPreference='Stop'
-Wait-Process -Id {os.getpid()} -ErrorAction SilentlyContinue
-$src={quote(staged)}
-$dst={quote(dest)}
-$backup=Join-Path $env:LOCALAPPDATA ('RingHi-backups/'+(Get-Date -Format yyyyMMddHHmmss))
-New-Item -ItemType Directory -Force $backup|Out-Null
-Copy-Item "$dst/*" $backup -Recurse -Force
-try {{
- Copy-Item "$src/*" $dst -Recurse -Force
- Start-Process "$dst/RingHi.exe"
-}} catch {{
- Copy-Item "$backup/*" $dst -Recurse -Force
- Start-Process "$dst/RingHi.exe"
- throw
-}}
-"""
-    script.write_text(body, encoding="utf-8-sig")
-    subprocess.Popen(
+    staged = Path(staged)
+    if not staged.is_file() or staged.suffix.lower() != ".exe":
+        raise ValueError("此版本需要 EXE 安装包，请下载新版安装程序")
+    folder = Path(tempfile.mkdtemp(prefix="RingHi-install-"))
+    script, ready, log = (
+        folder / "install.ps1",
+        folder / "ready",
+        folder / "install.log",
+    )
+    script.write_text(
+        installer_script(staged, dest, os.getpid(), ready, log), encoding="utf-8-sig"
+    )
+    env = os.environ.copy()
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    child = subprocess.Popen(
         [
-            "powershell",
+            "powershell.exe",
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
+            "-WindowStyle",
+            "Hidden",
             "-File",
             str(script),
         ],
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        env=env,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        close_fds=True,
     )
+    deadline = time.monotonic() + 8
+    while not ready.exists():
+        if child.poll() is not None or time.monotonic() > deadline:
+            child.terminate()
+            raise ValueError("更新助手未启动，应用保持打开，请稍后重试")
+        time.sleep(0.05)

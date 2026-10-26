@@ -108,6 +108,50 @@ def check_csv_gate(window, output):
     window.tick()
 
 
+def check_update_gate(window, output):
+    from unittest.mock import patch
+    from ringhi import ui
+
+    original_batch = window.batch
+    errors = []
+    calls = []
+    window.batch = None
+    window.update_info = {"version": "v99.0.0"}
+    with (
+        patch.object(window, "error", lambda e: errors.append(str(e))),
+        patch.object(ui.QMessageBox, "question", return_value=QMessageBox.Yes),
+        patch.object(window, "background", lambda *args: calls.append(args)),
+    ):
+        window.update_clicked()
+        assert window.updating and not window.start_button.isEnabled()
+
+        class Paused:
+            def resume(self):
+                raise AssertionError("Resume must be blocked during update")
+
+        window.batch = Paused()
+        window.resume()
+        window.batch = None
+        assert not window.resume_button.isEnabled()
+        window.start_batch()
+        assert window.preparing is None
+        window.update_clicked()
+        assert len(calls) == 1
+        window.update_failed("fixture-download-failure")
+        assert not window.updating and window.start_button.isEnabled()
+
+        class Busy:
+            busy = True
+            accepting = True
+
+        window.batch = Busy()
+        window.update_clicked()
+        assert len(calls) == 1 and not window.updating
+    window.batch = original_batch
+    window.update_info = None
+    window.tick()
+
+
 def check_expanded_table(window, output):
     from PySide6.QtWidgets import QApplication, QWidget
     from PySide6.QtCore import Qt, QPoint, QPointF
@@ -321,6 +365,8 @@ def schedule(window, output):
             window.grab().save(str(output / "queue-narrow.png"))
             window.resize(1440, 940)
             result["scrollValidation"] = check_expanded_table(window, output)
+            check_update_gate(window, output)
+            result["updateLocksBatchAndProtectsActiveTasks"] = True
             gaps = [b - a for a, b in zip(beats, beats[1:])]
             result.update(
                 passed=True,

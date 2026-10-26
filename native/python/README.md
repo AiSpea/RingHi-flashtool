@@ -1,7 +1,15 @@
-# RingHi Windows 原生工作台 0.5.5
+# RingHi Windows 原生工作台 0.5.6
 
 Python + PySide6 / Qt Widgets 完整实现。无浏览器内核，不调用 C# 程序或 DLL。
 ESP32 使用校验 SHA-256 的乐鑫官方 esptool 5.6.0；ML307 下载、备份、授权、串口拓扑和调度由 Python 实现。
+
+## 0.5.6 安装与在线更新
+
+- 分发 `RingHi-Setup-0.5.6-win-x64.exe`，安装到当前用户的固定目录，生成 RingHi 快捷方式；同一安装标识原位升级。
+- 首页左下角自动检查更新。空闲时点击更新，下载并验证 SHA-256，保存 CSV 和配置后退出安装，完成后自动打开，无需重启电脑。
+- 接收或执行烧录时不能更新；下载期间锁定新批次，失败恢复操作。安装器不强制终止烧录进程。
+- 数据继续保存在原用户目录，卸载不删除账号、CSV 和备份。更新助手启动失败时应用保持打开。
+- 构建安装包使用 Inno Setup：先 `build.ps1`，再 `installer/build-installer.ps1`。Release 需包含 EXE、兼容旧版的 ZIP 和 SHA256SUMS.txt；上传完成后才发布 Release。
 
 ## 0.5.5 识别与网络等待
 - 插入后先读取 ESP32 MAC、ML307 型号与 IMEI，再处理联网授权，网络等待不遮蔽本地识别结果。
@@ -45,7 +53,7 @@ Python 3.13，Windows x64；安装 `requirements-build.txt`，运行 `python -m 
 `build.ps1` 先测试再生成 onedir 应用；用户无需安装 Python。
 
 本包无代码签名，不宣称通过 Smart App Control / SmartScreen 信任验证。
-公开更新只接受同一 GitHub 仓库的 `RingHi-Python-x.y.z-win-x64.zip` + `SHA256SUMS.txt`；不将旧 Electron / C# 包误装为 Python 更新。
+公开更新只接受同一 GitHub 仓库、同一版本的 `RingHi-Setup-x.y.z-win-x64.exe` + `SHA256SUMS.txt`；兼容 ZIP 供 0.5.5 及更早 Python 客户端升级。
 
 ## 许可与第三方组件
 
