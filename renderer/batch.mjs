@@ -15,7 +15,7 @@ export function mountBatch({getConfig,canStart,disconnect,refresh,activationFact
  const csvCall=async(action,payload={})=>{const r=await window.ringhi.batchCsv(action,payload);if(!r.ok)throw Error(r.error);return r.data;};
  function csvResult(result){if(!result)return;csvState=result.saved?`已自动保存 ${result.rows} 条任务记录`:result.error;$('batch-csv-status').className=result.saved?'muted':'notice error';if(!result.saved){lastError=result.error;stop();}}
  async function saveRecord(record){const r=await window.ringhi.saveJob(record);csvResult(r.csv);if(r.csv?.saved===false)throw Error(r.csv.error||'批次 CSV 保存失败');update();}
- async function finishCsv(){if(!csvBatch||csvClosed||csvEnding)return;csvEnding=true;csvClosed=true;try{csvResult(await csvCall('end',{id:csvBatch.id}));}catch(e){csvState=e.message;$('batch-csv-status').className='notice error';}finally{csvEnding=false;update();}}
+ async function finishCsv(){if(!csvBatch||csvClosed||csvEnding)return;csvEnding=true;csvClosed=true;try{csvResult(await csvCall('end',{id:csvBatch.id}));}catch(e){csvState=e.message;$('batch-csv-status').className='notice error';}finally{csvEnding=false;if(batch&&!batch.busy&&!lastError)tell('已停止接收，任务已结束。可开启新批次；本批次结果和 CSV 已保留。');update();}}
  function selectedFilter(){
   if($('batch-adapter').value!=='custom'){const [vendorId,productId]=$('batch-adapter').value.split(':').map(Number);return {vendorId,productId};}
   const vid=$('batch-vid').value.trim(),pid=$('batch-pid').value.trim();if(!/^[0-9a-f]{4}$/i.test(vid)||!/^[0-9a-f]{4}$/i.test(pid))throw Error('VID 和 PID 请填写 4 位十六进制');

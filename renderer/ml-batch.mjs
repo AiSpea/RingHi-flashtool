@@ -5,6 +5,7 @@ import {Downloader,BackupStore,burn} from './upstream/ml307h/download.mjs';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 export class MlBatchFlasher {
  constructor({log=()=>{},progress=()=>{},stage=()=>{},open=NativeMlTransport.open,createSession=BackupStore.createSession,burnDevice=burn}={}){Object.assign(this,{log,progress,stage,open,createSession,burnDevice});this.at=null;this.usb=null;this.activation=null;}
+ cancel(){this.cancelled=true;this.activation?.dispose();}
  async probe(lease,pkg){this.lease=lease;this.pkg=pkg;this.stage('读取 ML307H 身份');this.at=await this.open(lease,'runtime');
   this.identity={...parseIdentity(await atCommand(this.at,'AT+CGMR'),await atCommand(this.at,'AT+CGSN=1')),mode:'checked',flashChecks:{board:!!pkg.compatibility.profile.board,reread:true,usbSerial:false}};
   if(!packageMatchesDevice(pkg,this.identity))throw Error('ML307H 固件与设备板型不匹配');return this.identity;
@@ -13,7 +14,7 @@ export class MlBatchFlasher {
   let created;
   try{
    // One activation context per physical board; never share an activation run.
-   this.activation=activationFactory?await activationFactory():null;
+   this.activation=activationFactory?await activationFactory():null;if(this.cancelled){this.activation?.dispose();throw Error('设备已拔出，授权流程已停止');}
    const current=parseIdentity(await atCommand(this.at,'AT+CGMR'),await atCommand(this.at,'AT+CGSN=1'));
    if(current.imei!==this.identity.imei)throw Error('ML307H 身份在准备期间变化，拒绝继续');
    created=await this.createSession(backup,this.pkg,this.identity,{firmwareName});this.store=created.store;this.identity=created.identity;
@@ -37,7 +38,7 @@ export class MlBatchFlasher {
  }
  async waitReady(){
   const end=Date.now()+45000;let error;
-  while(Date.now()<end){let t;try{t=await this.open(this.lease,'runtime');const current=parseIdentity(await atCommand(t,'AT+CGMR'),await atCommand(t,'AT+CGSN=1'));if(current.imei!==this.identity.imei)throw Object.assign(Error('ML307H 重启后身份不一致'),{identityMismatch:true});if(!packageMatchesDevice(this.pkg,current))throw Object.assign(Error('ML307H 重启后固件不匹配'),{identityMismatch:true});return current;}catch(e){if(e.identityMismatch)throw e;error=e;}finally{await t?.close();}await sleep(1000);}
+  while(Date.now()<end){if(this.cancelled)throw Error('设备已拔出，停止等待重启');let t;try{t=await this.open(this.lease,'runtime');const current=parseIdentity(await atCommand(t,'AT+CGMR'),await atCommand(t,'AT+CGSN=1'));if(current.imei!==this.identity.imei)throw Object.assign(Error('ML307H 重启后身份不一致'),{identityMismatch:true});if(!packageMatchesDevice(this.pkg,current))throw Object.assign(Error('ML307H 重启后固件不匹配'),{identityMismatch:true});return current;}catch(e){if(e.identityMismatch)throw e;error=e;}finally{await t?.close();}await sleep(1000);}
   throw Error('ML307H 重启就绪超时：'+(error?.message||'无响应'));
  }
  async disconnect(){const at=this.at,usb=this.usb;this.at=null;this.usb=null;await at?.close().catch(()=>{});await usb?.close().catch(()=>{});}

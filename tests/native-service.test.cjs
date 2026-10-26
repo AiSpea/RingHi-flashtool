@@ -57,3 +57,23 @@ test('scan retains Hub presence when both child interfaces temporarily disappear
 
 test('exit invalidates all leases and pending reads before a slow device close finishes',async()=>{const f=fixture();const boards=(await f.service.arm(config)).boards,{lease}=await f.service.claim(boards[0].id);let release;const gate=new Promise(r=>release=r);f.service.openUSB=async()=>({write:async()=>{},close:async()=>gate});const {handle}=await f.service.open({lease,role:'ml'});const read=assert.rejects(f.service.read({handle,timeout:60000}),/关闭/);const stop=f.service.dispose();assert.equal(f.service.leases.size,0);assert.equal(f.service.handles.size,0);await assert.rejects(f.service.write({handle,bytes:new Uint8Array([1])}),/关闭/);await assert.rejects(f.service.arm(config),/关闭/);await read;release();await stop;});
 test('exit during native opening closes the late resource and never returns a usable handle',async()=>{const f=fixture();const boards=(await f.service.arm(config)).boards,{lease}=await f.service.claim(boards[0].id);let resolve,closed=0;f.service.openUSB=async()=>new Promise(r=>resolve=r);const opening=f.service.open({lease,role:'ml'});const rejected=assert.rejects(opening,/关闭/);await f.service.dispose();resolve({close:async()=>closed++});await rejected;assert.equal(closed,1);assert.equal(f.service.handles.size,0);});
+
+test('Hub detach rejects an outstanding Windows write even if driver callback never arrives',async()=>{
+ const f=fixture();f.service.platform='win32';f.service.rows=async()=>[{path:'COM8',vid:0x303a,pid:0x1001,ports:[3,1],controller:'A'}];let port;
+ class Port extends EventEmitter{constructor(){super();port=this;}open(cb){this.isOpen=true;cb();}write(){}close(cb){this.isOpen=false;cb();}}
+ f.service.SerialPort=Port;const b=(await f.service.arm({mode:'esp32',filters:config.filters})).boards.find(b=>b.hubKey==='1:3'),{lease}=await f.service.claim(b.id),{handle}=await f.service.open({lease,role:'esp'});
+ const failed=assert.rejects(f.service.write({handle,bytes:new Uint8Array([1])}),/Hub.*断开/);await new Promise(r=>setTimeout(r,0));f.events.emit('detach',f.devices[0]);await failed;await f.service.release(lease);assert.equal(port.isOpen,false);assert.equal(f.service.leases.size,0);assert.equal(f.service.handles.size,0);await f.service.arm(config);await f.service.dispose();
+});
+test('silent Windows write callback timeout releases guards and never resends',async()=>{
+ const f=fixture();f.service.ioTimeout=10;let writes=0;class Port extends EventEmitter{open(cb){this.isOpen=true;cb();}write(){writes++;}close(cb){this.isOpen=false;cb();}}
+ f.service.SerialPort=Port;const q=new InputQueue(),port=await f.service.openSerial('COM8',115200,q);await assert.rejects(port.write(Buffer.from([1])),/写入超时/);await assert.rejects(port.write(Buffer.from([1])),/写入超时/);assert.equal(writes,1);assert.equal(q.waiters.size,0);await port.close();await f.service.dispose();
+});
+test('release invalidates every handle and removes the lease even when close callback hangs',async()=>{
+ const f=fixture();f.service.closeTimeout=10;const b=(await f.service.arm(config)).boards[0],{lease}=await f.service.claim(b.id);f.service.openUSB=async()=>({write:async()=>{},close:()=>new Promise(()=>{})});const {handle}=await f.service.open({lease,role:'ml'});
+ await assert.rejects(f.service.release(lease),/关闭超时/);assert.equal(f.service.leases.size,0);assert.equal(f.service.handles.size,0);await assert.rejects(f.service.write({handle,bytes:new Uint8Array([1])}),/关闭/);await f.service.arm(config);await f.service.dispose();
+});
+test('transient serial enumeration gap retries only the original branch, multiple paths still refuse',async()=>{
+ const f=fixture();const b=(await f.service.arm(config)).boards[0],{lease}=await f.service.claim(b.id);let polls=0;f.service.rows=async()=>++polls<3?[]:[{path:'/dev/cu.changed',vid:0x303a,pid:0x1001,bus:1,ports:[3,1]}];let opened;
+ f.service.openSerial=async path=>{opened=path;return {close:async()=>{}};};await f.service.open({lease,role:'esp'});assert.equal(opened,'/dev/cu.changed');assert.equal(polls,3);await f.service.release(lease);
+ f.service.rows=async()=>[{path:'/dev/cu.changed',vid:0x303a,pid:0x1001,bus:1,ports:[3,1]}];const next=await f.service.claim(b.id);f.service.rows=async()=>['/dev/cu.a','/dev/cu.b'].map(path=>({path,vid:0x303a,pid:0x1001,bus:1,ports:[3,1]}));await assert.rejects(f.service.open({lease:next.lease,role:'esp'}),/不唯一/);await f.service.dispose();
+});

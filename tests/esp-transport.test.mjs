@@ -15,3 +15,10 @@ test('write preserves SLIP escaping and releases lock on success',async()=>{
  const transport=new EspTransport(device,false);await transport.write(new Uint8Array([0xc0,0xdb,1]));
  assert.deepEqual(Array.from(packet),[0xc0,0xdb,0xdc,0xdb,0xdd,1,0xc0]);assert.equal(device.writable.locked,false);
 });
+test('disconnect error immediately rejects a long MD5 protocol wait and frees the reader',async()=>{
+ let source;const device={readable:new ReadableStream({start(c){source=c;}}),writable:new WritableStream(),async close(){}};const t=new EspTransport(device,false);const loop=t.readLoop();const result=assert.rejects(t.read(120000),/device removed/);source.error(Error('device removed'));await result;await loop;assert.equal(device.readable.locked,false);await t.disconnect();
+});
+test('SLIP reads preserve escaped payload and remaining packets, including split chunks',async()=>{
+ const t=new EspTransport({},false);t.buffer=Uint8Array.from([0xc0,1,0xdb,0xdc,0xdb,0xdd,0xc0,0xc0,2,0xc0]);assert.deepEqual([...await t.read(100)],[1,0xc0,0xdb]);assert.deepEqual([...await t.read(100)],[2]);
+ t.buffer=Uint8Array.from([0xc0,3,0xdb]);const read=t.read(100);setTimeout(()=>{t.buffer=Uint8Array.from([0xdc,0xc0]);},1);assert.deepEqual([...await read],[3,0xc0]);
+});
