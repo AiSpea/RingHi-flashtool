@@ -1,7 +1,7 @@
 // Real Electron shutdown regression, isolated user data and no hardware IO.
 const {_electron}=require('playwright'),assert=require('node:assert/strict'),path=require('node:path'),fs=require('node:fs/promises'),{randomUUID}=require('node:crypto');
 (async()=>{const results=[];for(const busy of [false,true]){let app;try{
- app=await _electron.launch({args:[path.resolve(__dirname,'..'),'--test-session'],env:{...process.env,ELECTRON_RUN_AS_NODE:''},timeout:30000});
+ app=await _electron.launch({args:[path.resolve(__dirname,'..'),'--test-session'],env:Object.fromEntries(Object.entries(process.env).filter(([key])=>key.toUpperCase()!=='ELECTRON_RUN_AS_NODE')),timeout:30000});
  const child=app.process(),stderr=[];child.stderr.on('data',d=>stderr.push(String(d)));const exited=new Promise(r=>child.once('exit',(code,signal)=>r({code,signal})));const page=await app.firstWindow();
  const data=await app.evaluate(({app,dialog})=>{const fs=process.getBuiltinModule('fs'),path=process.getBuiltinModule('path');const data=app.getPath('userData');global.closeResponses=[];dialog.showMessageBox=async()=>({response:global.closeResponses.shift()??0});dialog.showSaveDialog=async()=>({canceled:false,filePath:path.join(data,'shutdown.csv')});dialog.showErrorBox=(title,content)=>fs.appendFileSync(path.join(data,'unexpected-error.txt'),title+'\n'+content);return data;});
  await page.addInitScript(()=>{window.ringhi.onPrepareExit(()=>{window.ringhi.chooseDevice('late-selection');window.ringhi.setBusy(false);return [];});});
