@@ -32,3 +32,10 @@
 ## 0.3.25 安装器启动确认
 
 Windows 正式 0.3.22 → 0.3.23 的真实在线测试发现：公开下载与校验成功，点击安装后应用退出但未覆盖。安装器启动逻辑增加持久工作目录、唯一就绪回执和日志，主进程收到回执后才退出。0.3.24 仅作内部旧版客户端验证，正式包使用 0.3.25。Windows 直连 GitHub 下载很慢，本地已有代理也报连接关闭；实际下载测试通过仅监听回环的临时 SSH 通道使用 Mac 既有代理，系统代理设置保持不变。账号/项目密文、6 条任务、2 个已有 CSV 的 11 个文件在首次失败后逐字节保持不变。正式跨版本一键升级结果与自动重启证据需另行保存，不以外部启动安装脚本代替。
+
+
+## Windows updater host correction (0.3.26)
+
+The 0.3.25 attempt was withdrawn after the actual portable app did not replace itself. Minimal Electron tests on the Windows desktop showed PowerShell with detached=true exited with status 0 without executing either plain or encoded commands. Ordinary child creation executed the commands but did not survive the Electron parent. This matches Node issue https://github.com/nodejs/node/issues/51018. A GUI-subsystem .NET host now survives the parent and starts hidden PowerShell with valid redirected handles. The desktop probe confirmed readiness before parent exit and completion after exit. The install script still performs all target/package hash checks, backup, replacement and restart.
+
+The host source is desktop/update-host.cs; rebuild it on Windows with scripts/build-update-host.ps1 before packaging after source changes. The binary is included so cross-platform packaging does not need a Windows compiler. No scheduled task, elevated token, system proxy or execution-policy change is used by the product updater. Full installed one-click upgrade evidence is tracked separately from these software and process-lifecycle checks.

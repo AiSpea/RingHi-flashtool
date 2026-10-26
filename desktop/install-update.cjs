@@ -9,13 +9,13 @@ async function launchInstall({platform=process.platform,update,directory,executa
  const nonce=randomUUID(),script=path.join(directory,'install-portable.ps1'),config=path.join(directory,'install-portable.json'),readyFile=path.join(directory,`install-ready-${nonce}.json`),logFile=path.join(directory,'install-portable.log');
  await fs.copyFile(path.join(__dirname,'install-portable.ps1'),script);
  await fs.writeFile(config,JSON.stringify({source:update.file,version:update.version,target,pid,sha256:update.sha256,oldSha256,result:path.join(directory,'last-install.json'),readyFile,nonce}),{mode:0o600});
- const command=`& ([ScriptBlock]::Create([IO.File]::ReadAllText(${psQuote(script)}))) -ConfigPath ${psQuote(config)}`;
- const log=await fs.open(logFile,'a',0o600);let child,exited=false,launchError;
+ const host=path.join(directory,'update-host.exe');await fs.copyFile(path.join(__dirname,'update-host.exe'),host);
+ let child,exited=false,launchError;
  try{
-  // The portable EXE removes its extraction directory on exit. Start in a
-  // durable directory and wait for the script itself, not only CreateProcess.
-  const powershell=path.win32.join(process.env.SystemRoot||'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe');
-  child=spawnImpl(powershell,['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(command,'utf16le').toString('base64')],{cwd:directory,detached:true,stdio:['ignore',log.fd,log.fd],windowsHide:true});
+  // PowerShell cannot reliably start with DETACHED_PROCESS. A GUI-subsystem
+  // host survives Electron and creates a hidden, ordinary PowerShell child.
+  // Both live outside the portable extraction folder removed on app exit.
+  child=spawnImpl(host,[config],{cwd:directory,detached:true,stdio:'ignore',windowsHide:true});
   child.on('error',e=>{launchError=e;});child.on('exit',()=>{exited=true;});
   const start=Date.now();
   while(Date.now()-start<readyTimeoutMs){
@@ -26,6 +26,6 @@ async function launchInstall({platform=process.platform,update,directory,executa
   }
   throw Error('等待安装器就绪超时');
  }catch(e){if(child&&!exited)child.kill();throw Error(`${e.message}；原程序保留，安装日志：${logFile}`);}
- finally{await log.close();await fs.rm(readyFile,{force:true});}
+ finally{await fs.rm(readyFile,{force:true});}
 }
 module.exports={launchInstall,psQuote};
