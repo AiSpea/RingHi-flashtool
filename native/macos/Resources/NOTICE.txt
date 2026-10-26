@@ -1,0 +1,25 @@
+RingHi Native macOS 0.4.1 — Apple Silicon, macOS 13+
+
+The interface and coordinator use SwiftUI / AppKit, IOKit and POSIX serial I/O.
+No Electron, Chromium or web renderer is included.
+
+ESP32: Espressif esptool 5.6.0, GPL-2.0-or-later. Official one-file ARM64 tool,
+including its Python runtime. No separate Python install is required.
+https://github.com/espressif/esptool/releases/tag/v5.6.0
+Official tar.gz SHA256:
+08a58829a3f14bb08f2e39f4cad48dcb14b7000384268e7f06689836332d6e25
+Official extracted executable SHA256 before local ad-hoc signature:
+fe300417054386e8c15f916216924accb05d0132411bfce3b223ad621f0de6d9
+Bundled executable SHA256 after local ad-hoc signature (no code changes):
+230d151117a97d34dbedb32c50011b1d7c424275fba575a4b03a496799f64b63
+Source and license are in Resources/Tools.
+
+ML307 USB transport: libusb 1.0.30, LGPL-2.1-or-later, dynamically linked.
+Source and license are in Resources/Tools. Built with deployment target 13.0:
+./configure --disable-static --enable-shared CFLAGS='-O2 -mmacosx-version-min=13.0' LDFLAGS='-mmacosx-version-min=13.0'
+make -j4
+install_name_tool -id @rpath/libusb-1.0.0.dylib libusb/.libs/libusb-1.0.0.dylib
+The bundled source archive SHA256:
+fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf
+
+This internal build uses local ad-hoc signatures. It is not Apple-notarized.

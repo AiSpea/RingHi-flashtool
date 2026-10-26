@@ -1,7 +1,7 @@
-name: Build and release
+name: Build and release legacy Electron
 on:
   push:
-    tags: ['v*']
+    tags: ['v0.3.*']
   workflow_dispatch:
 permissions:
   contents: read
