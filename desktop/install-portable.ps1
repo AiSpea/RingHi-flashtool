@@ -5,6 +5,7 @@ $config=Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-J
 $stage=$null
 try {
   if(-not [IO.Path]::IsPathRooted($config.target) -or [IO.Path]::GetExtension($config.target) -ne '.exe'){throw 'Invalid portable application path'}
+  if($config.readyFile){@{nonce=$config.nonce;pid=$PID} | ConvertTo-Json | Set-Content -LiteralPath $config.readyFile -Encoding UTF8}
   # Only wait for the old app. Never terminate it or bypass its CSV/flash guard.
   for($attempt=0;$attempt -lt 120;$attempt++){
     if(-not (Get-Process -Id $config.pid -ErrorAction SilentlyContinue)){break}
