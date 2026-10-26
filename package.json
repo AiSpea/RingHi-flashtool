@@ -1,6 +1,6 @@
 {
   "name": "ringhi-flasher",
-  "version": "0.3.21",
+  "version": "0.3.22",
   "private": true,
   "description": "RingHi dual-chip firmware and production workstation",
   "author": "AiSpea",

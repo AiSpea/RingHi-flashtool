@@ -6,6 +6,7 @@ const {BackupFiles}=require('./backup-files.cjs');
 const {cleanProduction}=require('./production-record.cjs');
 const {BatchCsv}=require('./batch-csv.cjs');
 const {ShutdownCoordinator,saveInterruptedJobs}=require('./shutdown.cjs');
+const {registerRendererNotifications}=require('./ipc-notifications.cjs');
 const {randomUUID}=require('node:crypto');
 const {UpdateService}=require('./updates.cjs');
 const {launchInstall}=require('./install-update.cjs');
@@ -68,10 +69,10 @@ if(!app.requestSingleInstanceLock()&&!smoke)app.quit();else app.whenReady().then
   if(kind==='usb'&&(d.vendorId!==0x3563||![0x1000,0x2000].includes(d.productId)))return;
   const id=d.deviceId||d.portId;choice.items=choice.items.filter(x=>(x.deviceId||x.portId)!==id);if(add)choice.items.push(d);publish();
  });
- ipcMain.on('choose-device',(event,id)=>{check(event);if(!choice)return;const selected=choice.items.find(d=>(d.deviceId||d.portId)===id);const pending=choice;choice=null;if(selected)grants.add(deviceKey(pending.kind,selected));pending.callback(selected?id:'');});
+
  ipcMain.handle('native-batch',async(event,action,payload)=>{check(event);try{if(['arm','claim'].includes(action)&&updater?.state.phase==='downloading')throw Error('更新下载中，请稍后开启烧录批次');if(!nativeService){const {NativeService}=require('./native/service.cjs');nativeService=new NativeService();}return {ok:true,data:await nativeService.call(action,payload)};}catch(e){return {ok:false,error:e.message};}});
  ipcMain.handle('batch-access',(event,filters)=>{check(event);batchFilters=filters===null?[]:batchPolicy.filters(filters);return {enabled:batchFilters.length>0};});
- ipcMain.on('busy',(event,value)=>{if(!trusted(event)||shutdown?.blocked||updater?.state.phase==='installing')return;busy=Boolean(value);if(busy&&wakeBlocker===undefined)wakeBlocker=powerSaveBlocker.start('prevent-app-suspension');if(!busy&&wakeBlocker!==undefined){powerSaveBlocker.stop(wakeBlocker);wakeBlocker=undefined;}});
+
  const backupFiles=new BackupFiles(path.join(app.getPath('userData'),'backup-directory.json'),path.join(smoke||process.argv.includes('--test-session')?app.getPath('userData'):app.getPath('documents'),'RingHi Backups'));
  ipcMain.handle('backup-files',async(event,action,payload={})=>{
   check(event);try{
@@ -127,9 +128,15 @@ if(!app.requestSingleInstanceLock()&&!smoke)app.quit();else app.whenReady().then
  ipcMain.handle('history',event=>{check(event);return history();});
  ipcMain.handle('export-history',async event=>{check(event);const rows=await history();const chosen=await dialog.showSaveDialog(win,{defaultPath:'RingHi-records.json',filters:[{name:'JSON',extensions:['json']}]});if(chosen.canceled)return {canceled:true};await fs.writeFile(chosen.filePath,JSON.stringify({schema:1,exportedAt:new Date().toISOString(),records:rows},null,2));return {saved:true};});
  win.webContents.setWindowOpenHandler(()=>({action:'deny'}));win.webContents.on('will-navigate',event=>event.preventDefault());
- ipcMain.on('exit-snapshot',(event,payload)=>{
-  if(!trusted(event)||!exitSnapshot||payload?.id!==exitSnapshot.id)return;
-  try{if(!Array.isArray(payload.records)||payload.records.length>10000)throw Error('退出记录过多');exitSnapshot.resolve(payload.records.map(cleanRecord));}catch{exitSnapshot.resolve([]);}
+
+ registerRendererNotifications(ipcMain,{
+  isTrusted:trusted,isClosing:()=>Boolean(shutdown?.blocked||updater?.state.phase==='installing'),
+  chooseDevice:id=>{if(!choice)return;const selected=choice.items.find(d=>(d.deviceId||d.portId)===id);const pending=choice;choice=null;if(selected)grants.add(deviceKey(pending.kind,selected));pending.callback(selected?id:'');},
+  setBusy:value=>{busy=Boolean(value);if(busy&&wakeBlocker===undefined)wakeBlocker=powerSaveBlocker.start('prevent-app-suspension');if(!busy&&wakeBlocker!==undefined){powerSaveBlocker.stop(wakeBlocker);wakeBlocker=undefined;}},
+  exitSnapshot:payload=>{
+   if(!exitSnapshot||payload?.id!==exitSnapshot.id)return;
+   try{if(!Array.isArray(payload.records)||payload.records.length>10000)throw Error('退出记录过多');exitSnapshot.resolve(payload.records.map(cleanRecord));}catch{exitSnapshot.resolve([]);}
+  }
  });
  shutdown=new ShutdownCoordinator({
   isBusy:()=>busy||batchCsv.active.size>0||Boolean(nativeService?.leases.size),
