@@ -1,0 +1,26 @@
+{
+  "version": "0.5.5",
+  "localTests": 94,
+  "windowsTests": 94,
+  "packagedUI": {
+    "passed": true,
+    "csvSavedBeforeAuthorizationAndScan": true,
+    "csvExportMatches": true,
+    "cancelCloseKeepsWindow": true,
+    "closeSavedInterruptedCSV": true
+  },
+  "installed": {
+    "path": "C:/Users/AssAs/Desktop/RingHi-Native-Preview",
+    "preservedFiles": 68,
+    "existingDataUnchanged": true,
+    "versionVisible": true,
+    "autoLogin": true,
+    "startupRoutes": [
+      "direct",
+      "direct"
+    ]
+  },
+  "networkPolicy": "All authorization and updater requests use Session.trust_env=False, no proxy fallback; certificate verification retained.",
+  "physicalValidation": "Not performed on 0.5.5. Device disconnected before batch start; user requested software verification only.",
+  "packageSha256": "6f8f6dd56cab3e52f3d95d68af86685df6860ba6846d7eb9fc69277281d71f94"
+}

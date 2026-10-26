@@ -1,0 +1,48 @@
+{
+  "version": "0.5.4",
+  "date": "2026-10-26",
+  "softwareTests": 88,
+  "windowsNetwork": {
+    "freshDirectSuccess": 8,
+    "pooledDirectSuccess": 8,
+    "proxyFailures": 3,
+    "parallelSuccess": 32,
+    "parallelTotal": 32,
+    "pooledMeanMs": 67,
+    "desktopSessionProxyFailureReproduced": true,
+    "desktopSessionDirectSucceeded": true,
+    "expiredSessionRestoredSameAccountAndProject": true
+  },
+  "physicalTest": {
+    "macSuffix": "82:38",
+    "batch": "20261026-213001-473dfbaefa534148a0af7a083cb7db91",
+    "injectedProxyFailure": "connect-not-sent",
+    "successfulActivationKeyResponses": 1,
+    "successfulActivationReports": 1,
+    "espFullMD5": true,
+    "mlBackupWriteAndRuntimeIdentity": true,
+    "productionCloudAndReportUpload": true,
+    "csvSaved": true,
+    "receiptEncryptedAndIdentityMatched": true
+  },
+  "packagedUI": {
+    "passed": true,
+    "csvBeforeStart": true,
+    "cancelClose": true,
+    "closeSavesCSV": true,
+    "noInnerScrollbars": true
+  },
+  "deployment": {
+    "inPlace": true,
+    "preservedFiles": 67,
+    "packageSha256": "6d6908d35fd34378c154c7ddd5cdbad51774e3aa23693039f005c835a3c0955a",
+    "publicRelease": false
+  },
+  "limits": {
+    "historicalPendingMacSuffix": "1D:98",
+    "oldRequestDeliveryUnknown": true,
+    "oldActivationNotReplayed": true,
+    "activationOnlyResume": "software fault-injection and identity-gate tests, not physical recovery of the historical unknown request",
+    "finalAuthPreflight": "read-only Windows session-expiry validation; added after successful physical network-recovery run"
+  }
+}

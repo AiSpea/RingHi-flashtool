@@ -1,0 +1,6 @@
+RingHi uses the unmodified official Espressif esptool 5.6.0 standalone Windows executable as a separate process.
+Copyright Espressif Systems and esptool contributors. GPL-2.0-or-later; see ESPTOOL-LICENSE.txt.
+Release: https://github.com/espressif/esptool/releases/tag/v5.6.0
+Corresponding esptool source: esptool-source-v5.6.0.zip (also https://github.com/espressif/esptool/tree/v5.6.0).
+The official executable bundles Python and its dependencies; Python need not be installed by the user.
+Executable SHA256: 7a4fc0b651197d8034dab52db1468ebf5c009d8e754306e59c7de0aa47767914
