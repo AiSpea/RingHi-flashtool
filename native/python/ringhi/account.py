@@ -3,7 +3,7 @@
 import base64, ctypes as c, json, re, secrets, threading, time
 from .network import Transport, NetworkError, wait_network
 from . import storage, __version__
-from .storage import atomic, read_json, save_json
+from .storage import atomic, read_json, save_json, Cancel
 
 
 def dpapi(data, encrypt=False):
@@ -200,7 +200,12 @@ class Account:
     def ensure_authorized(self, cancel=None, status=lambda s: None, *, force=False):
         # Refresh only after a read-only query explicitly rejects the session.
         # Serialize refresh so concurrent boards do not compete to log in.
-        with self.auth_lock:
+        cancel = cancel or Cancel()
+        cancel.check()
+        while not self.auth_lock.acquire(timeout=0.1):
+            cancel.check()
+        try:
+            cancel.check()
             if (
                 not force
                 and self.authorized_context == (self.token, self.project, self.username)
@@ -238,9 +243,11 @@ class Account:
                     delivery="response",
                 )
             self.note_authorized()
+        finally:
+            self.auth_lock.release()
 
     def close_current(self):
-        self.transport.close_current()
+        self.transport.release_current()
 
     def close(self):
         self.transport.close()
@@ -349,29 +356,48 @@ class Prepared:
 
 
 def retryable_activation(record):
-    # Only a provably unsent first activation request may be started again.
-    # Old records without phase evidence, third-party keys and reports stay blocked.
+    # Product owner verified that the same chip/project can be authorized again.
+    # A new board task may resume a known attempt; this is not a transport retry
+    # loop. Validate context and archive the old attempt before making a new one.
     return bool(
         record
-        and not record.get("device_written")
-        and record.get("stage") in ("preparing", "device-preparing", "key-requesting")
-        and record.get("network", {}).get("delivery") == "not-sent"
+        and re.fullmatch(r"[a-f0-9]{16,128}", record.get("uid", ""))
+        and type(record.get("project_id")) is int
+        and record["project_id"] > 0
+        and isinstance(record.get("session"), str) and record["session"]
+        and record.get("stage") in (
+            "preparing", "device-preparing", "key-requesting", "device-writing",
+            "third-party-requesting", "third-party-writing", "reporting",
+        )
     )
+
+
+def check_activation_context(record, uid, project):
+    if not record:
+        return
+    if record.get("uid") != uid:
+        raise OSError("授权记录与实际芯片 UID 不一致，未开始激活")
+    if record.get("stage") != "complete":
+        if not retryable_activation(record):
+            raise OSError("原授权记录不完整，无法确认恢复对象；原备份已保留")
+        if project is not None and record.get("project_id") != project:
+            raise OSError("恢复授权需选择原授权项目，未自动更换项目")
 
 
 def activate(dl, uid, backup, account, prepared, cancel, status):
     path = storage.ROOT / "activation" / (uid + ".json")
     old = read_json(path, {})
-    if old and old.get("stage") != "complete" and not retryable_activation(old):
-        raise OSError("上次激活结果待核对，禁止重复领取；原备份已保留")
+    check_activation_context(old, uid, account.project)
     if retryable_activation(old):
-        if old.get("project_id") != account.project or old.get("session") != str(
-            backup
-        ):
+        if old.get("session") != str(backup):
             raise OSError("原激活项目或备份不匹配，未领取新激活码")
-        save_json(
-            path.parent / "history" / (uid + "-" + secrets.token_hex(6) + ".json"), old
-        )
+    cancel.check()
+    if old:
+        history = path.parent / "history" / (uid + "-" + secrets.token_hex(6))
+        save_json(history.with_suffix(".json"), old)
+        receipt_path = path.parent / "receipts" / (uid + ".dpapi")
+        if receipt_path.exists():
+            atomic(history.with_suffix(".dpapi"), receipt_path.read_bytes())
     parts = prepared.copy(account)
     record = {
         "uid": uid,
@@ -421,7 +447,7 @@ def activate(dl, uid, backup, account, prepared, cancel, status):
     try:
         account.choose_route(cancel, status)
         wait_network(
-            lambda: account.ensure_authorized(cancel, status, force=True),
+            lambda: account.ensure_authorized(cancel, status),
             cancel,
             status,
             query=True,

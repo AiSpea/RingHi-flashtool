@@ -67,6 +67,7 @@ def report(stage="passed", cloud=True, pending=False, upload="uploaded"):
             runId="round-2",
             stage=stage,
             ledPolicy="volte-card-v3",
+            simSlots=[dict(index=1, type="euicc", status="read", identitySuffix="12345678")],
             checks=[dict(id=i, status="passed") for i in ("wifi", "volte", "sim")],
         ),
     )
@@ -522,7 +523,7 @@ def test_ml_preflight_failure_prevents_esp_write(tmp_path, monkeypatch):
     batch.close()
 
 
-def test_activation_uncertainty_no_second_request(tmp_path):
+def test_activation_uncertainty_allows_new_task_without_transport_loop(tmp_path):
     from ringhi.account import activate
 
     class Cloud(Account):
@@ -540,9 +541,11 @@ def test_activation_uncertainty_no_second_request(tmp_path):
     prepared = Prepared(a, Cancel(), lambda s: None)
     with pytest.raises(NetworkError):
         activate(Device(), "a" * 32, tmp_path, a, prepared, Cancel(), lambda s: None)
-    with pytest.raises(OSError):
-        activate(Device(), "a" * 32, tmp_path, a, prepared, Cancel(), lambda s: None)
     assert a.calls.count("activation-key") == 1
+    with pytest.raises(NetworkError):
+        activate(Device(), "a" * 32, tmp_path, a, prepared, Cancel(), lambda s: None)
+    assert a.calls.count("activation-key") == 2
+    assert len(list((storage.ROOT / "activation" / "history").glob("*.json"))) == 1
     assert (
         "TEST_AES"
         not in (storage.ROOT / "activation" / ("a" * 32 + ".json")).read_text()

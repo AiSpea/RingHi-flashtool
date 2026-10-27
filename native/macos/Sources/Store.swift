@@ -14,6 +14,7 @@ final class Store: ObservableObject {
   @Published var mode = "dual"
   @Published var limit = 2
   @Published var production = true
+  @Published var product: ProductType = .simEsim
   @Published var project = 0
   @Published var projects: [Project] = []
   @Published var account = "未登录"
@@ -72,6 +73,7 @@ final class Store: ObservableObject {
       mode = text(s, "mode").isEmpty ? "dual" : text(s, "mode")
       limit = s["limit"] as? Int ?? 2
       production = s["production"] as? Bool ?? true
+      product = ProductType(rawValue: text(s, "productType")) ?? .simEsim
       csvDirectory = text(s, "csvDirectory")
     }
     if !["dual", "esp", "ml"].contains(mode) { mode = "dual" }
@@ -98,7 +100,7 @@ final class Store: ObservableObject {
       settings,
       [
         "esp": espPath, "ml": mlPath, "backup": backupPath, "mode": mode, "limit": limit,
-        "production": production, "csvDirectory": csvDirectory,
+        "production": production, "csvDirectory": csvDirectory, "productType": product.rawValue,
       ])
   }
   func loginDefault() {
@@ -224,7 +226,7 @@ final class Store: ObservableObject {
     let session = spark.snapshot()
     let cfg = Configuration(mode: mode, limit: limit, production: production, project: project,
       espURL: URL(fileURLWithPath: espPath), mlURL: URL(fileURLWithPath: mlPath),
-      backup: URL(fileURLWithPath: backupPath))
+      backup: URL(fileURLWithPath: backupPath), product: product)
     let previous = batch
     DispatchQueue.global().async {
       var prepared: ProjectAuthorization?

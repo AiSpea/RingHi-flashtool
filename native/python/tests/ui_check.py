@@ -277,6 +277,14 @@ def schedule(window, output):
                 ).x()
             )
             assert window.mode.count() == 3 and window.limit.count() == 6
+            assert window.product_type.count() == 2
+            window.product_type.setCurrentIndex(1)
+            window.save_settings()
+            window.product_type.setCurrentIndex(0)
+            window.settings = __import__("ringhi.storage", fromlist=["read_json"]).read_json(__import__("ringhi.storage", fromlist=["ROOT"]).ROOT / "settings.json")
+            window.load_settings()
+            assert window.product_type.currentData() == "dual_sim"
+            result["productSelectionPersists"] = True
             assert all(
                 widget.isVisible()
                 for widget in (
@@ -286,6 +294,7 @@ def schedule(window, output):
                     window.login_button,
                     window.projects,
                     window.production,
+                    window.product_type,
                     window.mode,
                     window.limit,
                 )
@@ -304,6 +313,7 @@ def schedule(window, output):
                 mode="esp",
                 production=False,
                 limit=2,
+                product_type="dual_sim",
             )
 
             def execute(b, resolve):
@@ -327,6 +337,10 @@ def schedule(window, output):
                 cfg, Account(), None, output / "ui.csv", execute=execute
             )
             window.batch.observe(pair("A") + pair("B"), {"A", "B"})
+            assert all(r["productType"] == "dual_sim" for r in window.batch.snapshots())
+            window.product_type.setCurrentIndex(0)
+            assert window.batch.cfg.product_type == "dual_sim"
+            result["batchProductFrozen"] = True
             window.config.hide()
             window.set_notice("软件验证 · 测试数据，不操作真实设备")
             QTimer.singleShot(180, remove)
@@ -337,6 +351,10 @@ def schedule(window, output):
         try:
             window.batch.observe(pair("B"), {"B"})
             window.batch.observe(pair("A") + pair("B"), {"A", "B"})
+            assert all(r["productType"] == "dual_sim" for r in window.batch.snapshots())
+            window.product_type.setCurrentIndex(0)
+            assert window.batch.cfg.product_type == "dual_sim"
+            result["batchProductFrozen"] = True
             QTimer.singleShot(1300, check)
         except Exception as e:
             fail(e)

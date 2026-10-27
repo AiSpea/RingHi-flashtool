@@ -9,6 +9,10 @@ struct TimelineEvent: Codable {
   var message: String
 }
 struct BoardState: Codable {
+  var productType: String? = nil
+  var cardCheck: String? = nil
+  var deviceStage: String? = nil
+  var deviceSim: String? = nil
   var id = UUID().uuidString, number = 0, hub = "", epoch = "", espKey = "", mlKey = "", mac = "",
     imei = "", connected = true, startedAt = timestamp(), endedAt = "", espFirmware = "",
     mlFirmware = "", espProgress = 0, mlProgress = 0, espState = "等待配对", mlState = "等待配对",
@@ -56,6 +60,7 @@ struct Configuration {
   var esp = Data()
   var pkg: MLPackage?
   var authorization: ProjectAuthorization? = nil
+  var product: ProductType = .simEsim
 }
 enum CSV {
   static func create(_ url: URL) throws {
@@ -74,6 +79,7 @@ enum CSV {
     "ML307 固件", "ESP32 进度", "ESP32 状态", "ML307 进度", "ML307 状态", "产测", "云端登记及上传", "整板结果", "原因",
     "备份路径", "产测轮次", "ESP32 引擎启动 UTC", "ESP32 首次写入回执 UTC", "ESP32 校验完成 UTC", "ML307 开始执行 UTC",
     "ML307 首次写入回执 UTC", "ML307 激活核验完成 UTC",
+    "产品类型代码", "产品类型", "eSIM 检查", "设备原始产测结果", "设备原始有卡检查",
   ]
   static func cell(_ text: String, identifier: Bool = false) -> String {
     var value = text
@@ -92,6 +98,7 @@ enum CSV {
         s.espFirmware, s.mlFirmware, String(s.espProgress), s.espState, String(s.mlProgress),
         s.mlState, s.production, s.cloud, s.result, s.reason, s.backup, s.runID, s.espStartedAt,
         s.espWritingAt, s.espCompletedAt, s.mlStartedAt, s.mlWritingAt, s.mlCompletedAt,
+        s.productType ?? "", ProductType.label(s.productType), s.cardCheck ?? "", s.deviceStage ?? "", s.deviceSim ?? "",
       ]
       lines.append(
         values.enumerated().map { cell($0.element, identifier: $0.offset == 2 || $0.offset == 3) }
@@ -136,6 +143,7 @@ final class Batch {
       try Disk.verified(frozen.espURL, config.esp)
     }
     self.config = frozen
+    try Disk.save(folder.appendingPathComponent("batch.json"), ["productType": frozen.product.rawValue, "production": frozen.production, "mode": frozen.mode])
     try save()
     if scanHardware && startImmediately { startScanning() }
   }
@@ -183,6 +191,7 @@ final class Batch {
           var b = current[pair.hub]
           if b == nil {
             var s = BoardState()
+            s.productType = config.product.rawValue
             s.number = rows.count + 1
             s.hub = pair.hub
             s.epoch = pair.epoch

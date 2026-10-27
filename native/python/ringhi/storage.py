@@ -69,6 +69,11 @@ COLUMNS = [
     ("reason", "原因"),
     ("backup", "备份路径"),
     ("runId", "产测轮次"),
+    ("productType", "产品类型代码"),
+    ("productName", "产品类型"),
+    ("cardCheck", "eSIM 检查"),
+    ("deviceStage", "设备原始产测结果"),
+    ("deviceSim", "设备原始有卡检查"),
 ]
 
 

@@ -36,6 +36,7 @@ from .storage import Cancel, read_json, save_json
 from .account import Account, Prepared, load_credentials, save_credentials, validate
 from .package import Package
 from .batch import Batch, Config
+from .product import PRODUCTS, SIM_ESIM
 from .esp import resource, validate_image, engine
 
 STYLE = """
@@ -76,6 +77,13 @@ QProgressBar::chunk { background: #118b76; border-radius: 3px; }
 QLabel#notice { background: #edf5f2; color: #365f55; border-radius: 7px; padding: 12px 16px; }
 QTextEdit { border: 1px solid #dce5e9; border-radius: 8px; padding: 12px; }
 """
+
+
+class NoWheelComboBox(QComboBox):
+    """Leave page scrolling to the parent; selection requires deliberate input."""
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 class ElidedLabel(QLabel):
@@ -461,7 +469,7 @@ class Window(QMainWindow):
         self.login_button = self.button("登录", self.login_dialog)
         account_row.addWidget(self.login_button)
         ml_layout.addLayout(account_row)
-        self.projects = QComboBox()
+        self.projects = NoWheelComboBox()
         self.projects.setPlaceholderText("选择官方授权项目")
         self.projects.currentIndexChanged.connect(self.select_project)
         ml_layout.addWidget(self.projects)
@@ -489,11 +497,20 @@ class Window(QMainWindow):
         conf.addWidget(esp_group, 1)
         all_config.addLayout(conf)
         options, options_layout = self.card()
+        options_layout.addWidget(QLabel("产品类型（切换后对新批次生效）"))
+        self.product_type = NoWheelComboBox()
+        for code, label in PRODUCTS.items():
+            self.product_type.addItem(label, code)
+        options_layout.addWidget(self.product_type)
+        product_note = QLabel("SIM + eSIM：必须读到 eSIM EID。双 SIM：卡槽/eSIM 检查不参与判定；授权、云端登记和最终报告上传仍须通过。")
+        product_note.setWordWrap(True)
+        product_note.setObjectName("muted")
+        options_layout.addWidget(product_note)
         option_row = QHBoxLayout()
         option_row.setSpacing(24)
-        self.mode = QComboBox()
+        self.mode = NoWheelComboBox()
         self.mode.addItems(["双芯烧录", "仅 ESP32", "仅 ML307H"])
-        self.limit = QComboBox()
+        self.limit = NoWheelComboBox()
         self.limit.addItems(["1", "2", "3", "4", "6", "8"])
         self.limit.setCurrentText("2")
         for label, field in (("烧录模式", self.mode), ("同时处理板数", self.limit)):
@@ -560,7 +577,7 @@ class Window(QMainWindow):
         text = QLabel(
             "RingHi 设备工作台 v"
             + __version__
-            + "\n\n1. 选择双芯固件、ML307 授权项目和备份目录。\n2. 开启新批次，选择本批次 CSV 文件。\n3. 插入板子后自动识别并执行；成功设备拔出后归档。\n4. 发生中断时保留原备份，重新插入后核对恢复条件。\n\nML307 默认自动激活。产测需要 AiSpea_Factory Wi-Fi 以及可用 SIM / eSIM。\nCSV 自动保存；关闭活动任务前会提示，可取消关闭。\n\n这是 Python + Qt 原生桌面应用，不包含浏览器内核。"
+            + "\n\n1. 选择双芯固件、ML307 授权项目和备份目录。\n2. 开启新批次，选择本批次 CSV 文件。\n3. 插入板子后自动识别并执行；成功设备拔出后归档。\n4. 发生中断时保留原备份，重新插入后核对恢复条件。\n\nML307 默认自动激活。产测需要 AiSpea_Factory Wi-Fi。SIM + eSIM 产品要求读到 EID；双 SIM 产品不要求插卡或 eSIM。\nCSV 自动保存；关闭活动任务前会提示，可取消关闭。\n\n这是 Python + Qt 原生桌面应用，不包含浏览器内核。"
         )
         text.setWordWrap(True)
         text.setStyleSheet("line-height:1.6;font-size:16px;")
@@ -718,6 +735,7 @@ class Window(QMainWindow):
         self.mode.setCurrentIndex(max(0, min(2, int(s.get("mode", 0)))))
         self.limit.setCurrentText(str(s.get("limit", 2)))
         self.production.setChecked(s.get("production", True))
+        self.product_type.setCurrentIndex(max(0, self.product_type.findData(s.get("productType", SIM_ESIM))))
 
     def save_settings(self):
         save_json(
@@ -729,6 +747,7 @@ class Window(QMainWindow):
                 mode=self.mode.currentIndex(),
                 limit=int(self.limit.currentText()),
                 production=self.production.isChecked(),
+                productType=self.product_type.currentData(),
                 csvDirectory=self.csv_dir,
             ),
         )
@@ -829,6 +848,7 @@ class Window(QMainWindow):
             ["dual", "esp", "ml"][self.mode.currentIndex()],
             self.production.isChecked(),
             int(self.limit.currentText()),
+            product_type=self.product_type.currentData(),
         )
         if cfg.production and cfg.mode != "dual":
             self.error("自动整板产测需要双芯模式；单芯烧录请取消产测")
@@ -1040,12 +1060,12 @@ class Window(QMainWindow):
             if self.batch.error:
                 self.set_notice(self.batch.error)
         self.config_summary.setText(
-            " / ".join(
+            PRODUCTS[self.batch.cfg.product_type if self.batch else self.product_type.currentData()] + " · " + (" / ".join(
                 Path(edit.text()).name
                 for edit in (self.ml_edit, self.esp_edit)
                 if edit.text()
             )
-            or "左右选择双芯固件，下方设置本批次流程"
+            or "左右选择双芯固件，下方设置本批次流程")
         )
         if self.closing and not self.preparing and not self.jobs:
             self.allow_close = True
@@ -1058,6 +1078,7 @@ class Window(QMainWindow):
             "mac",
             "imei",
             "ports",
+            "productName",
             "espProgress",
             "espState",
             "mlProgress",
@@ -1081,7 +1102,7 @@ class Window(QMainWindow):
             visible = {key: row.get(key, "") for key in fields}
             tips = (
                 str(row["task"]),
-                "\n".join(str(row.get(k, "")) for k in ("mac", "ports", "imei")),
+                "\n".join(str(row.get(k, "")) for k in ("mac", "ports", "imei", "productName")),
                 row.get("espState", ""),
                 row.get("mlState", ""),
                 row.get("production", "") + "\n" + row.get("cloud", ""),

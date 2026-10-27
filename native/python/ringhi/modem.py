@@ -1,13 +1,14 @@
 """One modem transaction, with durable intent and immutable original backups."""
 
 from pathlib import Path
+from datetime import datetime
 import struct, re, time
 from . import storage
 from .storage import read_json, save_json, verified, sha, now
-from .wire import open_ready, identity, at
+from .wire import open_ready, flash_identity as identity, at
 from .ports import NotReady
 from .protocol import Download, partition
-from .account import activate, retryable_activation
+from .account import activate, retryable_activation, check_activation_context
 
 
 def no_flash_written(state):
@@ -22,12 +23,54 @@ def no_flash_written(state):
 def old_for_mac(mac, pkg):
     records = [read_json(p) for p in (storage.ROOT / "ml-intents").glob("*.json")]
     records = [s for s in records if s.get("mac") == mac]
+    if len(records) > 1:
+        return resolved_alias(records, mac, pkg)
     if len(records) != 1 or records[0].get("firmwareSha256") != pkg.digest:
-        raise OSError("下载模式缺少唯一匹配的原固件及设备记录；未写入，请保留原备份")
+        raise OSError("下载模式缺少匹配的原固件及设备记录；未写入，请保留原备份")
     state = records[0]
     if not re.fullmatch(r"\d{15}", state.get("imei", "")):
         raise OSError("原记录缺少有效 IMEI")
     return state
+
+
+def resolved_alias(records, mac, pkg):
+    """Resolve old slot-1 IMEI aliases only with later verified hardware evidence.
+
+    Keep every historical record. A merely newer timestamp cannot supersede an
+    interrupted write, a different chip, or missing/corrupt original backups.
+    """
+    problem = "历史身份记录冲突，尚未确认同一芯片；未写入，请保留原备份"
+    try:
+        ordered = sorted(records, key=lambda r: datetime.fromisoformat(r["createdAt"]))
+        current = ordered[-1]
+        if current.get("phase") == "verified":
+            verified_state = current
+        elif no_flash_written(current) and current.get("previousBackup"):
+            verified_state = read_json(Path(current["previousBackup"]) / "session.json")
+        else:
+            raise ValueError(problem)
+        if (verified_state.get("phase") != "verified"
+                or verified_state.get("mac") != mac
+                or verified_state.get("imei") != current.get("imei")
+                or not re.fullmatch(r"\d{15}", current.get("imei", ""))
+                or any(r.get("firmwareSha256") != pkg.digest for r in (*records, verified_state))):
+            raise ValueError(problem)
+        confirmed = datetime.fromisoformat(verified_state["verifiedAt"])
+        uid = verified_state["uid"]
+        for older in ordered[:-1]:
+            if (older.get("uid") != uid
+                    or older.get("phase") not in ("verified", "awaiting-verification")
+                    or datetime.fromisoformat(older["createdAt"]) >= confirmed):
+                raise ValueError(problem)
+        original_backups(verified_state, pkg)
+        ledger = read_json(storage.ROOT / "activation" / (uid + ".json"), {})
+        if ledger.get("uid") != uid or ledger.get("stage") != "complete":
+            raise ValueError(problem)
+        # Ephemeral expectation: preparing remains untouched, but the live ROM
+        # UID must match before any new backup/erase/partition write.
+        return dict(current, recoveryUid=uid)
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise OSError(problem) from exc
 
 
 def original_backups(state, pkg, partial=False):
@@ -98,19 +141,20 @@ def enter_download(resolve, imei, cancel, status):
             pass
 
 
-def resume_activation(board, cfg, resolve, account, prepared, prior):
+def resume_activation(board, cfg, resolve, account, prepared, prior, already_download=False):
     cancel = board.cancel
     status = lambda text: board.update(mlState=text)
     ledger = read_json(storage.ROOT / "activation" / (prior["uid"] + ".json"), {})
     if (
-        prior.get("phase") != "activating"
-        or not retryable_activation(ledger)
+        prior.get("phase") not in ("activating", "awaiting-verification")
+        or not (retryable_activation(ledger) or ledger.get("stage") == "complete")
         or ledger.get("session") != prior.get("backup")
         or ledger.get("project_id") != account.project
         or prior.get("mac") != board.mac
         or prior.get("firmwareSha256") != cfg.package.digest
     ):
-        raise OSError("不能确认上次激活请求未发出，未重复领取")
+        raise OSError("原授权项目、设备或备份不匹配，未恢复激活")
+    check_activation_context(ledger, prior["uid"], account.project)
     original_backups(prior, cfg.package)
     # Confirm network readiness before switching a successfully written modem.
     account.choose_route(cancel, status)
@@ -118,24 +162,26 @@ def resume_activation(board, cfg, resolve, account, prepared, prior):
         imei=prior["imei"],
         backup=prior["backup"],
         mlProgress=92,
-        mlState="恢复未发出的激活请求 · 保留已写固件和原备份",
+        mlState="恢复同设备授权 · 保留已写固件和原备份",
     )
-    enter_download(resolve, prior["imei"], cancel, status)
+    if not already_download:
+        enter_download(resolve, prior["imei"], cancel, status)
     with open_ready(lambda: resolve("download"), cancel, status) as wire:
         dl = Download(wire, cancel)
         dl.bootstrap(cfg.package)  # RAM loaders only; no erase/partition writes.
         _, raw = dl.send(18, struct.pack("<I", 0), accepted=(0x83,))
         check_uid(prior["uid"], raw.hex())
         try:
-            activate(
-                dl,
-                prior["uid"],
-                Path(prior["backup"]),
-                account,
-                prepared,
-                cancel,
-                status,
-            )
+            if ledger.get("stage") != "complete":
+                activate(
+                    dl,
+                    prior["uid"],
+                    Path(prior["backup"]),
+                    account,
+                    prepared,
+                    cancel,
+                    status,
+                )
         finally:
             if not dl.broken and not cancel.event.is_set():
                 dl.reset()
@@ -149,7 +195,19 @@ def resume_activation(board, cfg, resolve, account, prepared, prior):
     board.update(mlProgress=100, mlState="激活恢复与启动身份确认完成 · 未重烧固件")
 
 
-def preflight(board, cfg, resolve):
+def pending_context(board, cfg, prior, project):
+    ledger = read_json(storage.ROOT / "activation" / (prior.get("uid", "") + ".json"), {})
+    check_activation_context(ledger, prior.get("uid"), project)
+    if (not ledger or ledger.get("session") != prior.get("backup")
+            or (project is not None and ledger.get("project_id") != project)
+            or prior.get("mac") != board.mac
+            or prior.get("firmwareSha256") != cfg.package.digest):
+        raise OSError("恢复需使用同一设备、原授权项目和原固件，原备份已保留")
+    original_backups(prior, cfg.package)
+    return ledger
+
+
+def preflight(board, cfg, resolve, project=None):
     """No flash writes until both chip identities/recovery records have been checked."""
     try:
         resolve("runtime")
@@ -160,18 +218,21 @@ def preflight(board, cfg, resolve):
             original_backups(
                 prior, cfg.package, partial=prior.get("phase") == "backing-up"
             )
+        elif prior.get("phase") in ("activating", "awaiting-verification"):
+            pending_context(board, cfg, prior, project)
         elif not no_flash_written(prior) and prior.get("phase") != "verified":
             raise OSError("下载中断阶段需核对原记录，未开始双芯写入")
-        if prior.get("uid"):
+        expected_uid = prior.get("uid") or prior.get("recoveryUid")
+        if expected_uid:
             ledger = read_json(
-                storage.ROOT / "activation" / (prior["uid"] + ".json"), {}
+                storage.ROOT / "activation" / (expected_uid + ".json"), {}
             )
-            if ledger and ledger.get("stage") != "complete":
-                raise OSError("上次授权请求未确认，未开始双芯写入")
+            check_activation_context(ledger, expected_uid, project)
         board.update(imei=prior["imei"], mlState="原恢复记录已核对")
         return
     with open_ready(lambda: resolve("runtime"), board.cancel, timeout=20) as wire:
-        imei, version = identity(wire, board.cancel, boot_wait=12)
+        imei, version = identity(wire, board.cancel, boot_wait=12,
+                                 status=lambda text: board.update(mlState=text))
     prior = read_json(storage.ROOT / "ml-intents" / (imei + ".json"), {})
     if (
         prior
@@ -180,17 +241,10 @@ def preflight(board, cfg, resolve):
         and not no_flash_written(prior)
     ):
         raise OSError("ML307 存在中断写入，请从下载模式使用原备份恢复；未开始双芯写入")
+    if prior and board.mac and prior.get("mac") and prior["mac"] != board.mac:
+        raise OSError("当前 IMEI 对应另一块板的记录，请核对卡槽和设备身份；未写入")
     if prior.get("phase") in ("activating", "awaiting-verification"):
-        ledger = read_json(
-            storage.ROOT / "activation" / (prior.get("uid", "") + ".json"), {}
-        )
-        if (
-            ledger.get("stage") != "complete"
-            and not (
-                prior.get("phase") == "activating" and retryable_activation(ledger)
-            )
-        ) or ledger.get("session") != prior.get("backup"):
-            raise OSError("上次授权结果未确认，未开始双芯写入")
+        pending_context(board, cfg, prior, project)
     board.update(imei=imei, mlState="型号与 IMEI 已确认")
 
 
@@ -211,14 +265,14 @@ def run(board, cfg, resolve, account, prepared):
     if runtime:
         status("核对 ML307H 型号与 IMEI")
         with open_ready(lambda: resolve("runtime"), cancel, status) as wire:
-            imei, version = identity(wire, cancel, boot_wait=12)
+            imei, version = identity(wire, cancel, boot_wait=12, status=status)
         prior = read_json(storage.ROOT / "ml-intents" / (imei + ".json"), {})
         # A completed write may merely have raced boot-time identity availability.
         if prior.get("phase") in ("awaiting-verification", "activating"):
             ledger = read_json(
                 storage.ROOT / "activation" / (prior.get("uid", "") + ".json"), {}
             )
-            if prior.get("phase") == "activating" and retryable_activation(ledger):
+            if retryable_activation(ledger):
                 resume_activation(board, cfg, resolve, account, prepared, prior)
                 return
             if (
@@ -244,6 +298,10 @@ def run(board, cfg, resolve, account, prepared):
         prior = old_for_mac(board.mac, pkg)
         imei = prior["imei"]
         version = prior.get("versionBefore", "")
+    if already_download and prior.get("phase") in ("activating", "awaiting-verification"):
+        pending_context(board, cfg, prior, account.project)
+        resume_activation(board, cfg, resolve, account, prepared, prior, already_download=True)
+        return
     board.update(imei=imei)
     recovery = already_download and prior.get("phase") in (
         "writing",
@@ -293,7 +351,7 @@ def run(board, cfg, resolve, account, prepared):
         save_json(backup / "session.json", state)
         save_json(intent, state)
 
-    if already_download and prior.get("uid") and not recovery:
+    if already_download and (prior.get("uid") or prior.get("recoveryUid")) and not recovery:
         save_json(backup / "session.json", state)
     else:
         save()
@@ -326,8 +384,9 @@ def run(board, cfg, resolve, account, prepared):
         uid = raw_uid.hex()
         if not re.fullmatch(r"[a-f0-9]{16,128}", uid):
             raise OSError("芯片 UID 无效")
-        if prior and prior.get("uid"):
-            check_uid(prior["uid"], uid)
+        expected_uid = (prior.get("uid") or prior.get("recoveryUid")) if prior else None
+        if expected_uid:
+            check_uid(expected_uid, uid)
         state["uid"] = uid
         if not recovery or resume_backup:
             state["phase"] = "backing-up"

@@ -111,8 +111,11 @@ final class RequestDelegate: NSObject, URLSessionDataDelegate, URLSessionTaskDel
 }
 final class Spark {
   private let configuration: () -> URLSessionConfiguration
-  init(configuration: @escaping () -> URLSessionConfiguration = Spark.directConfiguration) {
+  private let connections: OfficialConnectionPool
+  init(configuration: @escaping () -> URLSessionConfiguration = Spark.directConfiguration,
+    connections: OfficialConnectionPool? = nil) {
     self.configuration = configuration
+    self.connections = connections ?? OfficialConnectionPool(configuration())
   }
   private let lock = NSLock()
   private var token = ""
@@ -145,7 +148,7 @@ final class Spark {
     }
   }
   func snapshot() -> Spark {
-    let copy = Spark(configuration: configuration)
+    let copy = Spark(configuration: configuration, connections: connections)
     lock.with {
       copy.token = token
       copy.username = username
@@ -163,6 +166,9 @@ final class Spark {
     let config = URLSessionConfiguration.ephemeral
     config.connectionProxyDictionary = ["HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0,
       "ProxyAutoConfigEnable": 0, "ProxyAutoDiscoveryEnable": 0]
+    config.httpShouldSetCookies = false
+    config.httpCookieStorage = nil
+    config.httpMaximumConnectionsPerHost = 8
     config.timeoutIntervalForRequest = 60
     config.timeoutIntervalForResource = 65
     return config
@@ -186,11 +192,7 @@ final class Spark {
     if request.httpMethod == "POST" {
       request.httpBody = try JSONSerialization.data(withJSONObject: body)
     }
-    let delegate = RequestDelegate()
-    let configuration = self.configuration()
-    let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
-    let task = session.dataTask(with: request)
-    defer { session.invalidateAndCancel() }
+    let (task, delegate) = connections.http.task(request)
     task.resume()
     let deadline = Date().addingTimeInterval(mutation ? 66 : 21)
     while delegate.done.wait(timeout: .now() + 0.1) != .success {
@@ -255,9 +257,16 @@ final class Activation {
   }
   func run(_ dl: Download, _ uid: String, _ backup: URL, _ change: (String) -> Void) throws {
     let ledger = Disk.root.appendingPathComponent("activation/\(uid).json")
+    try ct.check()
     if FileManager.default.fileExists(atPath: ledger.path) {
       let old = try Disk.load(ledger)
-      try require(text(old, "stage") == "complete", "上次授权结果待核对，禁止重复领取，请保留原备份")
+      try MLRecovery.checkLedger(old, uid: uid, project: project)
+      try require(text(old, "stage") == "complete" || text(old, "session") == backup.path, "原授权备份不匹配")
+      let archiveID = uid + "-" + UUID().uuidString
+      try Disk.save(Disk.root.appendingPathComponent("activation/history/\(archiveID).json"), old)
+      if let receipt = try Credentials.readKeychain("com.aispea.ringhi.flasher.native.receipt", account: uid) {
+        try ActivationReceipt.save(uid: archiveID, value: json(receipt))
+      }
     }
     var record: Object = [
       "uid": uid, "project_id": project, "session": backup.path, "startedAt": timestamp(),

@@ -114,23 +114,53 @@ class Transport:
         self.local = threading.local()
         self.lock = threading.Lock()
         self.sessions = set()
+        self.idle = []
 
     def session(self, proxy=False):
         # Compatibility argument cannot opt the application into system proxies.
         proxy = False
         if getattr(self.local, "session", None) is None or self.local.proxy != proxy:
             self.close_current()
-            session = requests.Session()
-            session.trust_env = proxy
-            session.mount(
-                "https://",
-                PhaseAdapter(max_retries=0, pool_connections=1, pool_maxsize=1),
-            )
+            with self.lock:
+                session = self.idle.pop() if self.idle else None
+            if session is None:
+                session = requests.Session()
+                session.trust_env = False
+                session.mount(
+                    "https://",
+                    PhaseAdapter(max_retries=0, pool_connections=1, pool_maxsize=1),
+                )
             self.local.session, self.local.proxy = session, proxy
             self.local.ready = False
+            self.local.reusable = False
             with self.lock:
                 self.sessions.add(session)
         return self.local.session
+
+    def release_current(self):
+        """Return a healthy, fully consumed session for exclusive use by another worker.
+
+        Never share a requests Session concurrently. Cookies are not part of the
+        authorization protocol; bearer credentials are supplied per request only.
+        """
+        session = getattr(self.local, "session", None)
+        if session is None:
+            return
+        if not getattr(self.local, "reusable", False):
+            self.close_current()
+            return
+        if hasattr(session, "cookies"):
+            session.cookies.clear()
+        with self.lock:
+            keep = len(self.idle) < 8
+            if keep:
+                self.idle.append(session)
+        if not keep:
+            self.close_current()
+            return
+        self.local.session = None
+        self.local.ready = False
+        self.local.reusable = False
 
     def close_current(self):
         s = getattr(self.local, "session", None)
@@ -146,6 +176,7 @@ class Transport:
         with self.lock:
             sessions = list(self.sessions)
             self.sessions.clear()
+            self.idle.clear()
         for s in sessions:
             s.close()
         self.local.session = None
@@ -214,6 +245,7 @@ class Transport:
             proxy = self.local.proxy
             try:
                 s = self.session(proxy)
+                self.local.reusable = False
                 response = s.request(
                     method,
                     BASE + path,
@@ -236,6 +268,7 @@ class Transport:
                     response._content = bytes(raw)
                     response._content_consumed = True
                 self.local.last_used = time.monotonic()
+                self.local.reusable = True
                 audit(
                     action,
                     attempt,
@@ -277,7 +310,9 @@ class Transport:
                 retry = category != "certificate" and (safe or delivery == "not-sent")
                 if retry and attempt < 4:
                     status(
-                        f"正在恢复官方连接 · {attempt}/4"
+                        ("官方项目查询" if action == "projects" else "官方授权服务")
+                        + ("：连接未建立" if delivery == "not-sent" else "：响应中断")
+                        + f" · 重试 {attempt}/4"
                         + (" · 授权请求尚未发出" if not safe else "")
                     )
                     cancel.sleep(min(attempt, 3))

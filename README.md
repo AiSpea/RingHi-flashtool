@@ -4,14 +4,14 @@ RingHi 双芯片本地烧录工具。通过板载 USB Hub 配对 ESP32-S3 与 ML
 
 ## 安装
 
-- **Windows 0.5.6**：[EXE 安装包与发布说明](https://github.com/AiSpea/RingHi-flashtool/releases/tag/v0.5.6)。Windows 10/11 x64，Python + Qt 原生界面，自带运行环境。安装器沿用已有安装位置，保留账号、配置、CSV 和外部备份。旧 Electron / C# 用户请手动安装一次 EXE。
-- **Mac 0.4.5**：[PKG 安装包与发布说明](https://github.com/AiSpea/RingHi-flashtool/releases/tag/mac-v0.4.5)。Apple Silicon、macOS 13+，SwiftUI / AppKit 原生界面，覆盖 `/Applications/RingHi Flasher.app`。没有 Intel 包。
+- **Windows 0.5.11**：[EXE 安装包与发布说明](https://github.com/AiSpea/RingHi-flashtool/releases/tag/v0.5.11)。Windows 10/11 x64，Python + Qt 原生界面，自带运行环境。安装器沿用已有安装位置，保留账号、配置、CSV 和外部备份。旧 Electron / C# 用户请手动安装一次 EXE。
+- **Mac 0.4.8**：[PKG 安装包与发布说明](https://github.com/AiSpea/RingHi-flashtool/releases/tag/mac-v0.4.8)。Apple Silicon、macOS 13+，SwiftUI / AppKit 原生界面，覆盖 `/Applications/RingHi Flasher.app`。没有 Intel 包。
 
 安装包未取得 Windows 代码签名或 Apple Developer ID 签名、公证；部分电脑可能阻止首次安装。安装包不包含用户的密码、PC 注册码、固件或生产 CSV。新电脑需要配置官方授权账号及兼容的设备驱动。
 
 ## 使用
 
-1. 选择适用的 ESP32-S3 完整 16 MB BIN、ML307H PKG、备份目录及官方授权项目。
+1. 选择产品类型（SIM + eSIM 或双 SIM 卡槽），再选择适用的 ESP32-S3 完整 16 MB BIN、ML307H PKG、备份目录及官方授权项目。
 2. 开启新批次，先新建 CSV；取消或保存失败不会接收设备。准备完成后处理已接入和新插入的板卡。
 3. 同一板载 Hub 对应一行，两芯独立烧录。ML307 默认自动激活。开启产测时，产测、云端登记及最终报告上传均确认并完成收尾后才判整板成功。
 4. 成功设备仍保留在当前接入列表，拔出后归档；重新插入建立新任务。CSV 持续保存，也可导出。
@@ -25,12 +25,12 @@ Windows 首页自动检查公开 Release。空闲时点击更新，下载并校�
 
 Mac 原生版目前通过 PKG 原位更新，尚未接入自动更新。Mac 发布使用独立标签，不改变 Windows 的 latest 更新入口。
 
-更新固定直连 GitHub，不携带仓库访问令牌；网络不可达或校验失败不会安装。Windows 0.5.6 的覆盖安装、更新助手及数据保留已验证；本轮直连 GitHub 下载较慢，完整公开下载测试未完成。
+更新固定直连 GitHub，不携带仓库访问令牌；网络不可达或校验失败不会安装。Windows 0.5.11 的覆盖安装、更新助手及数据保留已验证；公开资产以 Release 的 SHA256SUMS.txt 校验清单为准。
 
 ## 源码与验证
 
-- [Windows Python 原生版](native/python/README.md)：构建、依赖、许可和 [0.5.6 验证记录](native/python/VALIDATION-0.5.6.md)。
-- [Mac Swift 原生版](native/macos/README.md)：构建、依赖、许可和 [0.4.5 验证记录](native/macos/VALIDATION-0.4.5.md)。
+- [Windows Python 原生版](native/python/README.md)：构建、依赖、许可和 [0.5.11 验证记录](native/python/VALIDATION-0.5.11.md)。
+- [Mac Swift 原生版](native/macos/README.md)：构建、依赖、许可和 [0.4.8 验证记录](native/macos/VALIDATION-0.4.8.md)。
 
 当前根目录 Node/Electron 源码及其 `npm` 构建脚本仅用于保留旧版 0.3.x，不是以上原生安装包的构建入口。旧版 GitHub Actions 只匹配 `v0.3.*` 标签。原生安装包按各目录构建、验证后手动上传完整草稿 Release，再公开发布。
 

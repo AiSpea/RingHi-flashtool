@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.5.6"
+  #define AppVersion "0.5.11"
 #endif
 [Setup]
 AppId=com.aispea.ringhi.python

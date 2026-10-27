@@ -1,6 +1,40 @@
 import AppKit
 import SwiftUI
 
+// Forward wheel gestures to the page; changing a value requires deliberate input.
+final class NoWheelPopUpButton: NSPopUpButton {
+  override func scrollWheel(with event: NSEvent) { nextResponder?.scrollWheel(with: event) }
+}
+struct ClickPicker<Value: Hashable>: NSViewRepresentable {
+  @Binding var selection: Value
+  var items: [(String, Value)]
+  var label: String
+  @Environment(\.isEnabled) private var enabled
+  final class Coordinator: NSObject {
+    var owner: ClickPicker
+    init(_ owner: ClickPicker) { self.owner = owner }
+    @objc func changed(_ sender: NSPopUpButton) {
+      guard owner.items.indices.contains(sender.indexOfSelectedItem) else { return }
+      owner.selection = owner.items[sender.indexOfSelectedItem].1
+    }
+  }
+  func makeCoordinator() -> Coordinator { Coordinator(self) }
+  func makeNSView(context: Context) -> NoWheelPopUpButton {
+    let view = NoWheelPopUpButton(frame: .zero, pullsDown: false)
+    view.target = context.coordinator
+    view.action = #selector(Coordinator.changed(_:))
+    return view
+  }
+  func updateNSView(_ view: NoWheelPopUpButton, context: Context) {
+    context.coordinator.owner = self
+    let titles = items.map { $0.0 }
+    if view.itemTitles != titles { view.removeAllItems(); view.addItems(withTitles: titles) }
+    view.selectItem(at: items.firstIndex { $0.1 == selection } ?? -1)
+    view.isEnabled = enabled
+    view.setAccessibilityLabel(label)
+  }
+}
+
 extension Color {
   static let ink = Color(red: 0.08, green: 0.17, blue: 0.20),
     teal = Color(red: 0.02, green: 0.49, blue: 0.42),
@@ -170,6 +204,7 @@ struct Workspace: View {
         if !store.csvPath.isEmpty {
           HStack(alignment: .top) {
             Image(systemName: "doc.text")
+            Text("本批次产品：" + (store.batch?.config.product ?? store.product).label).font(.system(size: 12, weight: .medium))
             Text("本批次 CSV：" + store.csvPath).font(.system(size: 12)).textSelection(.enabled)
             Spacer()
             Button("导出 CSV", action: store.export).buttonStyle(.plain).foregroundColor(.teal)
@@ -197,10 +232,8 @@ struct Workspace: View {
               VStack(alignment: .leading, spacing: 12) {
                 Text("\(store.account) · 自动激活").foregroundColor(.teal)
                 HStack {
-                  Picker("授权项目", selection: $store.project) {
-                    Text("请选择授权项目").tag(0)
-                    ForEach(store.projects) { p in Text("\(p.name)（\(p.id)）").tag(p.id) }
-                  }.labelsHidden()
+                  ClickPicker(selection: $store.project,
+                    items: [("请选择授权项目", 0)] + store.projects.map { ("\($0.name)（\($0.id)）", $0.id) }, label: "授权项目")
                   Button(store.loginBusy ? "登录中…" : "登录 / 切换") { store.showLogin = true }.disabled(
                     store.loginBusy)
                 }
@@ -226,18 +259,17 @@ struct Workspace: View {
           }
           Divider()
           HStack(spacing: 24) {
-            Picker("烧录范围", selection: $store.mode) {
-              Text("双芯烧录").tag("dual")
-              Text("仅 ESP32").tag("esp")
-              Text("仅 ML307H").tag("ml")
-            }.frame(width: 230)
-            Picker("并行板数", selection: $store.limit) {
-              ForEach([1, 2, 3, 4, 6, 8], id: \.self) { Text("\($0) 台").tag($0) }
-            }.frame(width: 150)
+            Text("烧录范围")
+            ClickPicker(selection: $store.mode, items: [("双芯烧录", "dual"), ("仅 ESP32", "esp"), ("仅 ML307H", "ml")], label: "烧录范围").frame(width: 160)
+            Text("并行板数")
+            ClickPicker(selection: $store.limit, items: [1, 2, 3, 4, 6, 8].map { ("\($0) 台", $0) }, label: "并行板数").frame(width: 100)
             Spacer()
           }
+          Text("产品类型（切换后对新批次生效）")
+          ClickPicker(selection: $store.product, items: ProductType.allCases.map { ($0.label, $0) }, label: "产品类型").frame(maxWidth: 420)
+          Text("SIM + eSIM：必须读到 eSIM EID。双 SIM：卡槽/eSIM 不参与判定；Wi-Fi、授权、登记及报告上传仍须通过。").font(.system(size: 12)).foregroundColor(.muted)
           Toggle("烧录后自动产测；产测、云端登记和报告上传全部确认后才算整板成功", isOn: $store.production).toggleStyle(.checkbox)
-          Text("产测需要 AiSpea_Factory 工厂 Wi-Fi 和测试 SIM / eSIM。").font(.system(size: 11))
+          Text("产测需要 AiSpea_Factory 工厂 Wi-Fi；双空 SIM 卡槽产品无需插入测试卡。").font(.system(size: 11))
             .foregroundColor(.muted)
         }.padding(.top, 20).disabled(store.locked)
       } label: {
@@ -343,6 +375,7 @@ struct BoardRow: View {
       VStack(alignment: .leading, spacing: 6) {
         Text(s.mac.isEmpty ? "等待读取 MAC" : s.mac).font(
           .system(size: 12, weight: .semibold, design: .monospaced))
+        Text(ProductType.label(s.productType)).font(.system(size: 10)).foregroundColor(.muted)
         if !s.imei.isEmpty { Text("IMEI " + s.imei).font(.system(size: 10)) }
         Text("Hub \(s.hub) · \(s.connected ? "已接入":"已拔出")").font(.system(size: 11)).foregroundColor(
           .muted)
@@ -391,6 +424,9 @@ struct BoardDetails: View {
       Text(s.mac.isEmpty ? "尚未读到 MAC" : s.mac).font(.system(.body, design: .monospaced))
       ScrollView {
         VStack(alignment: .leading, spacing: 14) {
+          detail("产品类型", ProductType.label(s.productType))
+          detail("eSIM 检查", s.cardCheck ?? "未执行")
+          detail("设备原始产测", (s.deviceStage ?? "未执行") + " · " + (s.deviceSim ?? ""))
           detail("ESP32", s.espState)
           detail("ML307H", s.mlState)
           detail("产测", s.production)

@@ -22,4 +22,4 @@ fi
 exit 0
 PRE
 chmod 755 "$SCRIPTS/preinstall"
-pkgbuild --root "$ROOT" --component-plist "$BUILD/components.plist" --scripts "$SCRIPTS" --identifier com.aispea.ringhi.flasher.native.pkg --version 0.4.5 --install-location / "$OUT"
+pkgbuild --root "$ROOT" --component-plist "$BUILD/components.plist" --scripts "$SCRIPTS" --identifier com.aispea.ringhi.flasher.native.pkg --version 0.4.8 --install-location / "$OUT"

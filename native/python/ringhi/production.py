@@ -2,6 +2,7 @@ import json, time, codecs
 from dataclasses import dataclass
 from .wire import open_ready
 from .storage import Cancelled
+from .product import SIM_ESIM, DUAL_SIM, validate, optional_card_failure, eid_observed
 
 
 @dataclass
@@ -13,6 +14,9 @@ class Result:
     pending: bool = True
     upload: str = ""
     phase: str = ""
+    card: str = "等待检查"
+    raw_stage: str = ""
+    raw_sim: str = ""
 
     @property
     def ready(self):
@@ -24,7 +28,8 @@ class Result:
         )
 
 
-def evaluate(status):
+def evaluate(status, product_type=SIM_ESIM):
+    validate(product_type)
     report = status.get("report") or {}
     r = Result(
         run_id=report.get("runId", ""),
@@ -36,12 +41,20 @@ def evaluate(status):
     if not r.run_id or not isinstance(checks, list):
         return r
     stage = report.get("stage")
-    failed = [c for c in checks if c.get("status") == "failed"]
+    r.raw_stage = stage or ""
+    r.raw_sim = "；".join(str(c.get("status", "")) + ": " + str(c.get("detail", ""))
+                           for c in checks if c.get("id") == "sim")
+    r.card = "不适用（双 SIM 卡槽）" if product_type == DUAL_SIM else "等待读取 eSIM EID"
+    exempt_card = product_type == DUAL_SIM and optional_card_failure(report)
+    if exempt_card:
+        r.card = "卡槽/eSIM 检查不参与判定（双 SIM，原结果已记录）"
+    failed = [c for c in checks if c.get("status") == "failed"
+              and not (exempt_card and c.get("id") == "sim")]
     if stage == "cancelled" or report.get("cancelled"):
         r.state = "cancelled"
         r.reason = "设备取消产测"
         return r
-    if stage == "failed" or failed:
+    if (stage == "failed" and not exempt_card) or failed:
         r.state = "failed"
         r.reason = (
             "；".join(c.get("id", "") + ": " + c.get("detail", "") for c in failed)
@@ -52,16 +65,23 @@ def evaluate(status):
         r.state = "review"
         r.reason = "需要 s3.142 或兼容 volte-card-v3 的产测固件"
         return r
-    if stage != "passed":
+    if stage != "passed" and not (stage == "failed" and exempt_card):
         r.reason = "产测中：" + str(stage)
         return r
     if not all(
         any(c.get("id") == i and c.get("status") == "passed" for c in checks)
-        for i in ("wifi", "volte", "sim")
+        for i in (("wifi", "volte", "sim") if product_type == SIM_ESIM else ("wifi", "volte"))
     ):
         r.state = "review"
         r.reason = "产测终态与必检项不一致"
         return r
+    if product_type == SIM_ESIM:
+        if not eid_observed(report):
+            r.state = "review"
+            r.reason = "此产品要求读到 eSIM EID；普通 SIM / CPIN 有卡响应不能代替 eSIM"
+            r.card = "未确认 eSIM EID"
+            return r
+        r.card = "eSIM EID 已读取"
     r.state = "passed"
     r.phase = "registration" if not r.cloud else "upload" if not r.ready else "closing"
     r.reason = (
@@ -71,6 +91,8 @@ def evaluate(status):
         if not r.ready
         else "产测与云端确认完成 · 释放端口"
     )
+    if product_type == DUAL_SIM:
+        r.reason += " · eSIM 不适用（双 SIM 卡槽）"
     return r
 
 
@@ -110,7 +132,8 @@ def status(wire, cancel):
     return command(wire, "FACTORY STATUS", parse, cancel)
 
 
-def run(resolve, cancel, change):
+def run(resolve, cancel, change, product_type=SIM_ESIM):
+    validate(product_type)
     port = None
     try:
         deadline = time.monotonic() + 45
@@ -170,13 +193,13 @@ def run(resolve, cancel, change):
             if next_seq < sequence:
                 raise OSError("产测报告序号倒退")
             sequence = next_seq
-            r = evaluate(s)
+            r = evaluate(s, product_type)
             change(r)
             if r.ready:
                 port.close()
                 port = None
                 r.phase = "complete"
-                r.reason = "产测通过 · 云端登记和报告上传完成"
+                r.reason = "产测通过 · 云端登记和报告上传完成 · " + r.card
                 change(r)
                 return r
             if r.state == "passed":

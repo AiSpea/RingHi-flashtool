@@ -3,10 +3,11 @@ import Foundation
 struct FactoryResult {
   var state = "running", reason = "等待产测", runID = "", upload = "", phase = "", firmware = ""
   var cloud = false, pending = false
+  var card = "等待检查", rawStage = "", rawSim = ""
   var ready: Bool { state == "passed" && cloud && !pending && upload == "uploaded" }
 }
 enum Factory {
-  static func evaluate(_ status: Object) -> FactoryResult {
+  static func evaluate(_ status: Object, product: ProductType = .simEsim) -> FactoryResult {
     let report = object(status, "report")
     let checks = report["checks"] as? [Object] ?? []
     var r = FactoryResult()
@@ -18,13 +19,19 @@ enum Factory {
     if r.runID.isEmpty || report["checks"] == nil { return r }
     let stage = text(report, "stage")
     let policy = text(report, "ledPolicy")
+    r.rawStage = stage
+    r.rawSim = checks.filter { text($0, "id") == "sim" }.map {
+      text($0, "status") + ": " + text($0, "detail")
+    }.joined(separator: "；")
+    r.card = product == .dualSim ? "卡槽/eSIM 不参与判定（双 SIM 卡槽）" : "等待读取 eSIM EID"
+    let exemptCard = product == .dualSim && ProductType.optionalCardFailure(report)
     if stage == "cancelled" || bool(report, "cancelled") {
       r.state = "cancelled"
       r.reason = "设备取消产测"
       return r
     }
-    let failed = checks.filter { text($0, "status") == "failed" }
-    if stage == "failed" || !failed.isEmpty {
+    let failed = checks.filter { text($0, "status") == "failed" && !(exemptCard && text($0, "id") == "sim") }
+    if (stage == "failed" && !exemptCard) || !failed.isEmpty {
       r.state = "failed"
       r.reason =
         failed.isEmpty
@@ -37,11 +44,12 @@ enum Factory {
       r.reason = "需要 s3.142 或兼容 volte-card-v3 的产测固件"
       return r
     }
-    if stage != "passed" {
+    if stage != "passed" && !(stage == "failed" && exemptCard) {
       r.reason = "产测中：" + stage
       return r
     }
-    if !["wifi", "volte", "sim"].allSatisfy({ id in
+    let required = product == .simEsim ? ["wifi", "volte", "sim"] : ["wifi", "volte"]
+    if !required.allSatisfy({ id in
       checks.contains { text($0, "id") == id && text($0, "status") == "passed" }
     }) {
       r.state = "review"
@@ -52,9 +60,19 @@ enum Factory {
       r.reason = "等待完整云端登记与上传状态"
       return r
     }
+    if product == .simEsim {
+      guard ProductType.eidObserved(report) else {
+        r.state = "review"
+        r.reason = "此产品要求读到 eSIM EID；普通 SIM / CPIN 有卡响应不能代替 eSIM"
+        r.card = "未确认 eSIM EID"
+        return r
+      }
+      r.card = "eSIM EID 已读取"
+    }
     r.state = "passed"
     r.phase = !r.cloud ? "registration" : (!r.ready ? "upload" : "closing")
     r.reason = !r.cloud ? "产测通过 · 等待云端登记" : (!r.ready ? "云端登记成功 · 等待最终报告上传" : "产测与云端确认完成 · 释放串口")
+    if product == .dualSim { r.reason += " · eSIM 卡槽/eSIM 不参与判定（双 SIM 卡槽）" }
     return r
   }
   static func command(_ wire: Wire, _ command: String, _ ct: Cancellation, accept: (String) -> Any?)
@@ -84,7 +102,7 @@ enum Factory {
       return d
     } as? Object
   }
-  static func run(open: () throws -> Wire, change: (FactoryResult) -> Void, ct: Cancellation) throws
+  static func run(open: () throws -> Wire, change: (FactoryResult) -> Void, ct: Cancellation, product: ProductType = .simEsim) throws
     -> FactoryResult
   {
     var port: Wire?
@@ -128,13 +146,13 @@ enum Factory {
         try require(next >= sequence, "产测报告序号倒退")
         sequence = next
       }
-      last = evaluate(status)
+      last = evaluate(status, product: product)
       change(last)
       if last.ready {
         wire.close()
         port = nil
         last.phase = "complete"
-        last.reason = "产测通过 · 云端登记和报告上传完成"
+        last.reason = "产测通过 · 云端登记和报告上传完成 · " + last.card
         return last
       }
       if last.state == "passed" {

@@ -109,8 +109,8 @@ enum Inventory {
         reason = "等待 ESP32"
       } else if mode != "esp" && mls.count != 1 {
         reason = "等待 ML307H"
-      } else if mode != "esp" && mls.first?.product != 0x2000 {
-        reason = "ML307H 已在下载模式，请核对原备份后恢复"
+      } else if mode != "esp" && ![0x2000, 0x1000].contains(mls.first?.product ?? 0) {
+        reason = "ML307H 模式未识别"
       } else if mode != "ml" && esps.first?.paths.count != 1 {
         reason = "等待唯一 ESP32 串口"
       }

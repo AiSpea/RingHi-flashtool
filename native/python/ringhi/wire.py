@@ -122,3 +122,31 @@ def identity(wire, cancel, boot_wait=0):
             if time.monotonic() >= deadline:
                 raise
             cancel.sleep(0.7)
+
+
+def flash_identity(wire, cancel, boot_wait=0, status=lambda s: None):
+    """Use the primary-slot IMEI for flashing; identity() itself stays read-only.
+
+    RingHi factory tests can leave slot 1 selected. Its IMEI is not the stable
+    identity used by our original backups. Normalize before any ledger lookup.
+    Stock/blank-module firmware keeps its existing identification path.
+    """
+    result = identity(wire, cancel, boot_wait)
+    if "ringhi" not in result[1].lower():
+        return result
+
+    def slot():
+        reply = at(wire, "AT^SIMSLOT?", cancel, timeout=5)
+        matches = re.findall(r"(?m)^\s*\^SIMSLOT:\s*([01])\s*$", reply)
+        if len(matches) != 1:
+            raise OSError("未确认 ML307 当前卡槽，尚未开始写入")
+        return int(matches[0])
+
+    if slot() == 1:
+        status("恢复主卡槽 · 重新核对设备身份")
+        at(wire, "AT^SIMSLOT=0", cancel, timeout=10)
+        at(wire, 'AT^AEM=1,"ACT"', cancel, timeout=15)
+        if slot() != 0:
+            raise OSError("ML307 主卡槽恢复未确认，尚未开始写入")
+        result = identity(wire, cancel, boot_wait=max(boot_wait, 20))
+    return result

@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 
@@ -10,6 +11,18 @@ final class ReceiptTestProtocol: URLProtocol {
     client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
     client?.urlProtocol(self, didLoad: Data(#"{"code":200,"data":{"cdkey":"TEST_RECEIPT","has3rd":0}}"#.utf8))
     Self.completed?()
+    client?.urlProtocolDidFinishLoading(self)
+  }
+  override func stopLoading() {}
+}
+final class RouteTestProtocol: URLProtocol {
+  override class func canInit(with request: URLRequest) -> Bool { true }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+  override func startLoading() {
+    let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [:])!
+    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+    let bytes = try! JSONSerialization.data(withJSONObject: ["code": 200, "data": ["route": request.url!.lastPathComponent]])
+    client?.urlProtocol(self, didLoad: bytes)
     client?.urlProtocolDidFinishLoading(self)
   }
   override func stopLoading() {}
@@ -79,6 +92,65 @@ enum SelfTests {
     try rejects("existing CSV cannot be overwritten") { try CSV.create(csv) }
     try check("existing CSV unchanged", try Data(contentsOf: csv) == CSV.bytes([]))
     try rejects("invalid CSV path prevents start") { try CSV.create(Disk.root.appendingPathComponent("missing/new.csv")) }
+  }
+  static func connectionPoolChecks() throws {
+    var created = 0
+    let account = Spark(configuration: {
+      created += 1
+      let config = Spark.directConfiguration(); config.protocolClasses = [RouteTestProtocol.self]; return config
+    })
+    let snapshot = account.snapshot()
+    let lock = NSLock(); var failures: [String] = []
+    let group = DispatchGroup()
+    for i in 0..<8 {
+      group.enter()
+      Thread.detachNewThread {
+        defer { group.leave() }
+        let action = i % 2 == 0 ? "projects" : "project-keys"
+        do {
+          let result = try (i % 2 == 0 ? account : snapshot).call(action, [:], Cancellation()) as? Object ?? [:]
+          if text(result, "route") != Spark.routes[action] { lock.with { failures.append("cross-task response") } }
+        } catch { lock.with { failures.append(error.localizedDescription) } }
+      }
+    }
+    group.wait()
+    try check("one connection pool shared by batch snapshots", created == 1)
+    try check("parallel official responses remain isolated", failures.isEmpty)
+    let ct = Cancellation(); ct.cancel()
+    try rejects("cancelled board cannot send request") { _ = try snapshot.call("projects", [:], ct) }
+    let result = try account.call("projects", [:], Cancellation()) as? Object ?? [:]
+    try check("cancelled board does not invalidate other connections", text(result, "route") == "getauthorize")
+    try check("shared connection pool sends no cookies", !Spark.directConfiguration().httpShouldSetCookies)
+  }
+  static func aliasRecoveryChecks() throws {
+    let uid = String(repeating: "c", count: 32)
+    let directory = Disk.root.appendingPathComponent("alias-original")
+    let original: Object = ["mac": "test-board", "imei": "111111111111111", "uid": uid, "phase": "verified",
+      "firmwareSha256": "fixture", "createdAt": "2026-10-27T05:26:00Z", "verifiedAt": "2026-10-27T05:27:00Z"]
+    var old = original; old["imei"] = "222222222222222"; old["phase"] = "awaiting-verification"; old["createdAt"] = "2026-10-27T05:12:00Z"
+    let current: Object = ["mac": "test-board", "imei": "111111111111111", "phase": "preparing", "firmwareSha256": "fixture",
+      "createdAt": "2026-10-27T07:09:00Z", "previousBackup": directory.path]
+    try Disk.save(directory.appendingPathComponent("session.json"), original)
+    try Disk.save(Disk.root.appendingPathComponent("activation/\(uid).json"), ["uid": uid, "stage": "complete"])
+    var validations = 0
+    let selected = try MLRecovery.selectDownload([old, current], mac: "test-board", digest: "fixture") { _ in validations += 1 }
+    try check("alias resolved to canonical IMEI and live UID expectation", text(selected, "imei") == "111111111111111" && text(selected, "recoveryUid") == uid)
+    try check("alias backup must be validated and preparing stays untouched", validations == 1 && MLRecovery.untouched(selected))
+    _ = try MLRecovery.selectDownload([old, original], mac: "test-board", digest: "fixture") { _ in }
+    try check("verified current record supersedes proven old alias", true)
+    for (field, value) in [("uid", String(repeating: "d", count: 32)), ("phase", "writing"), ("firmwareSha256", "other"), ("createdAt", "2026-10-27T08:00:00Z"), ("createdAt", "invalid")] {
+      var bad = old; bad[field] = value
+      try rejects("alias cannot bypass " + field + ":" + value) {
+        _ = try MLRecovery.selectDownload([bad, current], mac: "test-board", digest: "fixture") { _ in }
+      }
+    }
+    try rejects("corrupt alias backup stops recovery") {
+      _ = try MLRecovery.selectDownload([old, current], mac: "test-board", digest: "fixture") { _ in throw Failure("corrupt backup") }
+    }
+    try Disk.save(Disk.root.appendingPathComponent("activation/\(uid).json"), ["uid": uid, "stage": "key-requesting"])
+    try rejects("unfinished authorization cannot be superseded") {
+      _ = try MLRecovery.selectDownload([old, current], mac: "test-board", digest: "fixture") { _ in }
+    }
   }
   static func authorizationChecks() throws {
     var calls: [String] = []
@@ -190,9 +262,51 @@ enum SelfTests {
     catch { actualError = error.localizedDescription }
     try check("shipped macOS esptool pre-open output recognized", DeviceIdentity.beforePortOpened(actualError))
   }
+  static func recoveryChecks() throws {
+    for initial in [0, 1] {
+      var slot = initial; var commands: [String] = []
+      let identity = try DeviceIdentity.flashIdentity(read: { (slot == 0 ? "111111111111111" : "222222222222222", "RingHi") }, command: { cmd, _ in
+        commands.append(cmd)
+        if cmd == "AT^SIMSLOT=0" { slot = 0 }
+        return cmd == "AT^SIMSLOT?" ? "^SIMSLOT: \(slot)\r\nOK" : "OK"
+      })
+      try check("slot normalized before IMEI " + String(initial), identity.0 == "111111111111111")
+      try check("slot restore commands bounded", commands.count == (initial == 0 ? 1 : 4))
+    }
+    _ = try DeviceIdentity.flashIdentity(read: { ("111111111111111", "ML307H-DC-MBRH1S00") }, command: { _, _ in throw Failure("stock must not change slot") })
+    for failure in ["AT^SIMSLOT?", "AT^SIMSLOT=0", "AT^AEM=1,\"ACT\"", "readback"] {
+      try rejects("slot failure stops identity: " + failure) {
+        _ = try DeviceIdentity.flashIdentity(read: { ("222222222222222", "RingHi") }, command: { cmd, _ in
+          if cmd == failure { throw Failure("timeout") }
+          return cmd == "AT^SIMSLOT?" ? "^SIMSLOT: 1\r\nOK" : "OK"
+        })
+      }
+    }
+    let uid = String(repeating: "a", count: 32)
+    let backup = Disk.root.appendingPathComponent("recovery-backup").path
+    var ledger: Object = ["uid": uid, "project_id": 42, "stage": "key-requesting", "session": backup]
+    let path = Disk.root.appendingPathComponent("activation/\(uid).json")
+    let prior: Object = ["uid": uid, "phase": "activating", "imei": "111111111111111", "mac": "test-MAC", "firmwareSha256": "fixture-hash", "backup": backup]
+    for stage in MLRecovery.stages.union(["complete"]) {
+      ledger["stage"] = stage; try Disk.save(path, ledger)
+      _ = try MLRecovery.context(prior, mac: "test-MAC", digest: "fixture-hash", project: 42)
+      try check("known activation stage recoverable " + stage, true)
+    }
+    ledger["stage"] = "key-requesting"; try Disk.save(path, ledger)
+    for field in ["uid", "backup", "mac", "firmwareSha256", "imei", "phase"] {
+      var bad = prior; bad[field] = "different"
+      try rejects("recovery mismatch " + field) { _ = try MLRecovery.context(bad, mac: "test-MAC", digest: "fixture-hash", project: 42) }
+    }
+    try rejects("wrong recovery project") { _ = try MLRecovery.context(prior, mac: "test-MAC", digest: "fixture-hash", project: 43) }
+    ledger["stage"] = "unknown"; try Disk.save(path, ledger)
+    try rejects("unknown activation stage blocked") { _ = try MLRecovery.context(prior, mac: "test-MAC", digest: "fixture-hash", project: 42) }
+  }
   static func run() throws {
     Disk.root = URL(fileURLWithPath: "/tmp/ringhi-native-tests-" + UUID().uuidString)
     print("Isolated evidence: " + Disk.root.path)
+    try recoveryChecks()
+    try aliasRecoveryChecks()
+    try connectionPoolChecks()
     try check(
       "SHA256 vector",
       Data("abc".utf8).sha256 == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
@@ -280,12 +394,13 @@ enum SelfTests {
     try check("ambiguous ESP blocked", !Inventory.pairs(d, mode: "dual")[0].ready)
     d = devices()
     d[2].product = 0x1000
-    try check("download mode requires recovery", !Inventory.pairs(d, mode: "dual")[0].ready)
+    try check("download mode reaches guarded recovery preflight", Inventory.pairs(d, mode: "dual")[0].ready)
     try check(
       "missing chip waits", !Inventory.pairs(Array(devices().prefix(2)), mode: "dual")[0].ready)
     try check("single chip mode", Inventory.pairs(Array(devices().prefix(2)), mode: "esp")[0].ready)
     var report: Object = [
       "runId": "test", "stage": "passed", "ledPolicy": "volte-card-v3",
+      "simSlots": [["index": 1, "type": "euicc", "status": "read", "identitySuffix": "12345678"]],
       "checks": [
         ["id": "wifi", "status": "passed"], ["id": "volte", "status": "passed"],
         ["id": "sim", "status": "passed"],
@@ -309,6 +424,71 @@ enum SelfTests {
     report["checks"] = [["id": "wifi", "status": "failed", "detail": "no Wi-Fi"]]
     status["report"] = report
     try check("failure reason", Factory.evaluate(status).reason.contains("no Wi-Fi"))
+    let emptyDetail = "Neither slot confirmed a card, or modem/card query failed"
+    let emptyChecks: [Object] = [["id": "wifi", "status": "passed"], ["id": "volte", "status": "passed"], ["id": "sim", "status": "failed", "detail": emptyDetail]]
+    let emptySlots: [Object] = [["index": 0, "type": "none", "status": "empty"], ["index": 1, "type": "none", "status": "empty"]]
+    let emptyReport: Object = ["runId": "empty", "stage": "failed", "ledPolicy": "volte-card-v3", "checks": emptyChecks, "simSlots": emptySlots]
+    let emptyStatus: Object = ["report": emptyReport, "cloudRegistered": true, "pendingUpload": false, "upload": "uploaded"]
+    let dual = Factory.evaluate(emptyStatus, product: .dualSim)
+    try check("dual empty slots accepted", dual.ready && dual.card.contains("不参与判定"))
+    try check("raw device failure preserved", dual.rawStage == "failed" && dual.rawSim.contains(emptyDetail))
+    try check("eSIM product never auto downgrades", !Factory.evaluate(emptyStatus).ready)
+    for (key, value) in [("cloudRegistered", false as Any), ("cloudRegistered", "true" as Any), ("pendingUpload", true as Any), ("upload", "pending" as Any)] {
+      var s = emptyStatus; s[key] = value
+      try check("dual keeps cloud gate " + key, !Factory.evaluate(s, product: .dualSim).ready)
+    }
+    for stage in ["sim_check", "volte_passed", "cancelled", "connected"] {
+      var r = emptyReport; r["stage"] = stage; var s = emptyStatus; s["report"] = r
+      try check("dual waits terminal " + stage, !Factory.evaluate(s, product: .dualSim).ready)
+    }
+    for id in ["wifi", "volte", "storage", "unknown_check"] {
+      var r = emptyReport; r["checks"] = emptyChecks + [["id": id, "status": "failed", "detail": "real failure"]]
+      var s = emptyStatus; s["report"] = r
+      try check("dual preserves failure " + id, !Factory.evaluate(s, product: .dualSim).ready)
+    }
+    for reason in ["Cannot restore SIM slot after eUICC check: timeout", "Original SIM slot restored but recovery marker could not be cleared", "Cannot read/save original SIM slot", "Power interrupted this factory run; retest required", "unknown reason"] {
+      var checks = emptyChecks; checks[2]["detail"] = reason
+      var r = emptyReport; r["checks"] = checks; var s = emptyStatus; s["report"] = r
+      try check("slot error cannot be waived " + reason, !Factory.evaluate(s, product: .dualSim).ready)
+    }
+    for slots in [Array(emptySlots.prefix(1)), [emptySlots[0], emptySlots[0]], [["index": 0, "type": "none", "status": "empty"], ["index": 1, "type": "unknown", "status": "error"]]] {
+      var r = emptyReport; r["simSlots"] = slots; var s = emptyStatus; s["report"] = r
+      try check("optional slot snapshots not required", Factory.evaluate(s, product: .dualSim).ready)
+    }
+    for reason in [emptyDetail, "SIM selection/communication failed", "Cannot restore SIM slot after eUICC check: SIM selection/activation did not respond within deadline"] {
+      var checks = emptyChecks; checks[2]["detail"] = reason
+      var r = emptyReport; r["checks"] = checks; r.removeValue(forKey: "simSlots")
+      var s = emptyStatus; s["report"] = r
+      try check("dual optional card result " + reason, Factory.evaluate(s, product: .dualSim).ready)
+      try check("eSIM still fails " + reason, !Factory.evaluate(s, product: .simEsim).ready)
+      s["cloudRegistered"] = false
+      try check("optional failure waits registration", Factory.evaluate(s, product: .dualSim).phase == "registration" && !Factory.evaluate(s, product: .dualSim).ready)
+      s["cloudRegistered"] = true; s["pendingUpload"] = true
+      try check("optional failure waits upload", Factory.evaluate(s, product: .dualSim).phase == "upload" && !Factory.evaluate(s, product: .dualSim).ready)
+      s["pendingUpload"] = false
+      try check("raw card failure preserved", Factory.evaluate(s, product: .dualSim).rawSim.contains(reason))
+    }
+    var passedReport = emptyReport
+    passedReport["stage"] = "passed"
+    passedReport["checks"] = [["id": "wifi", "status": "passed"], ["id": "volte", "status": "passed"], ["id": "sim", "status": "passed"]]
+    for slot: Object in [["index": 0, "type": "sim", "status": "read", "identitySuffix": "123456"], ["index": 1, "type": "unknown", "status": "responding"], ["index": 1, "type": "euicc", "status": "read", "identitySuffix": "garbage!"]] {
+      var r = passedReport; r["simSlots"] = [slot]; var s = emptyStatus; s["report"] = r
+      try check("eSIM requires valid EID evidence", !Factory.evaluate(s).ready)
+      try check("dual does not require EID", Factory.evaluate(s, product: .dualSim).ready)
+    }
+    for index in [0, 1] {
+      var r = passedReport; r["simSlots"] = [["index": index, "type": "euicc", "status": "read", "identitySuffix": "12345678"]]
+      var s = emptyStatus; s["report"] = r
+      try check("eSIM either slot", Factory.evaluate(s).ready)
+    }
+    var skuRow = BoardState(); skuRow.productType = ProductType.dualSim.rawValue
+    skuRow.cardCheck = dual.card; skuRow.deviceStage = dual.rawStage; skuRow.deviceSim = dual.rawSim
+    let skuCSV = String(decoding: CSV.bytes([skuRow]), as: UTF8.self)
+    try check("CSV product and original report retained", skuCSV.contains("双 SIM 卡槽") && skuCSV.contains(emptyDetail) && skuCSV.contains("failed"))
+    let oldRow = BoardState()
+    let oldData = try JSONEncoder().encode(oldRow)
+    let oldRoundtrip = try JSONDecoder().decode(BoardState.self, from: oldData)
+    try check("legacy row remains unclassified", oldRoundtrip.productType == nil && ProductType.label(oldRoundtrip.productType) == "未记录")
     try check("CSV formula guard", CSV.cell("=1+1") == "\"'=1+1\"")
     var row = BoardState()
     row.mac = "02:00:00:00:00:01"

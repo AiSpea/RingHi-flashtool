@@ -38,15 +38,8 @@ enum BoardFlow {
     }
     if ml {
       b.change { $0.mlState = "读取 IMEI 与固件身份" }
-      let wire = try USBWire(resolve("ml", false), download: false)
-      defer { wire.close() }
-      version = try DeviceIdentity.modemVersion { try AT.command(wire, $0, ct) }
-      let imei = try AT.imei(wire, ct)
-      wire.close()
-      b.change {
-        $0.imei = imei
-        $0.mlState = "批次授权已就绪"
-      }
+      version = try MLRecovery.preflight(b, cfg, resolve)
+      b.change { $0.mlState = "批次授权已就绪" }
       activation = try Activation(spark, cfg.project, cfg.authorization, ct)
     }
     try ct.check()
@@ -115,11 +108,14 @@ enum BoardFlow {
         change: { r in
           b.change {
             $0.runID = r.runID
+            $0.cardCheck = r.card
+            $0.deviceStage = r.rawStage
+            $0.deviceSim = r.rawSim
             $0.production = r.state == "passed" ? "产测通过" : r.reason
             $0.cloud = !r.cloud ? "等待登记" : r.ready ? "登记与报告上传成功" : "已登记 · 等待报告上传"
             $0.reason = r.reason
           }
-        }, ct: ct)
+        }, ct: ct, product: cfg.product)
       b.change {
         $0.production = result.reason
         $0.cloud = result.ready ? "登记与报告上传成功" : "未完整确认"
@@ -138,10 +134,16 @@ enum BoardFlow {
     let ct = b.ct
     let imei = b.state.imei
     let intent = Disk.root.appendingPathComponent("ml-intents/\(imei).json")
-    if FileManager.default.fileExists(atPath: intent.path) {
-      let old = try Disk.load(intent)
-      try require(text(old, "phase") == "verified", "这台设备有未完成烧录记录，请核对原备份：" + text(old, "backup"))
+    var alreadyDownload = false
+    do { _ = try resolve("ml", false) } catch is PortNotReady { _ = try resolve("ml", true); alreadyDownload = true }
+    let old = alreadyDownload ? try MLRecovery.downloadRecord(b.state.mac, pkg)
+      : FileManager.default.fileExists(atPath: intent.path) ? try Disk.load(intent) : [:]
+    if ["activating", "awaiting-verification"].contains(text(old, "phase")) {
+      try MLRecovery.resume(b, cfg, activation, old, resolve)
+      return
     }
+    let expectedUID = text(old, "uid").isEmpty ? text(old, "recoveryUid") : text(old, "uid")
+    try require(old.isEmpty || text(old, "phase") == "verified" || MLRecovery.untouched(old), "这台设备有未完成烧录记录，请核对原备份：" + text(old, "backup"))
     let backup = cfg.backup.appendingPathComponent(
       DateFormatter.batch.string(from: Date()) + "_" + imei + "_" + b.id)
     try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true)
@@ -151,23 +153,28 @@ enum BoardFlow {
       "hub": b.state.hub, "firmwareSha256": pkg.digest, "versionBefore": version,
       "backup": backup.path, "phase": "preparing", "createdAt": timestamp(),
     ]
+    if !old.isEmpty { state["previousBackup"] = text(old, "backup") }
     func save() throws {
       try Disk.save(backup.appendingPathComponent("session.json"), state)
       try Disk.save(intent, state)
     }
-    try save()
-    do {
-      let wire = try USBWire(resolve("ml", false), download: false)
-      defer { wire.close() }
-      try require(try AT.imei(wire, ct) == imei, "下载前 IMEI 改变")
-      _ = try AT.command(wire, "AT^AUTODL", ct, timeout: 3, disconnectOK: true)
-    }
-    try ct.sleep(2)
-    if (try? resolve("ml", true)) == nil {
-      let wire = try USBWire(resolve("ml", false), download: false)
-      defer { wire.close() }
-      try require(try AT.imei(wire, ct) == imei, "下载前 IMEI 改变")
-      _ = try AT.command(wire, "AT^RESET=normal", ct, timeout: 3, disconnectOK: true)
+    if alreadyDownload && !expectedUID.isEmpty {
+      try Disk.save(backup.appendingPathComponent("session.json"), state)
+    } else { try save() }
+    if !alreadyDownload {
+      do {
+        let wire = try USBWire(resolve("ml", false), download: false)
+        defer { wire.close() }
+        try require(try DeviceIdentity.flashIdentity(wire, ct).0 == imei, "下载前 IMEI 改变")
+        _ = try AT.command(wire, "AT^AUTODL", ct, timeout: 3, disconnectOK: true)
+      }
+      try ct.sleep(2)
+      if (try? resolve("ml", true)) == nil {
+        let wire = try USBWire(resolve("ml", false), download: false)
+        defer { wire.close() }
+        try require(try DeviceIdentity.flashIdentity(wire, ct).0 == imei, "下载前 IMEI 改变")
+        _ = try AT.command(wire, "AT^RESET=normal", ct, timeout: 3, disconnectOK: true)
+      }
     }
     let device = try wait(ct, timeout: 25) { try resolve("ml", true) }
     let wire = try USBWire(device, download: true)
@@ -197,6 +204,10 @@ enum BoardFlow {
     try dl.bootstrap(pkg)
     let uid = try dl.send(18, Data.le(0, 4), accepted: [0x83]).1.hex
     try require(matches(uid, "^[a-f0-9]{16,128}$"), "设备 UID 无效")
+    try require(expectedUID.isEmpty || expectedUID == uid, "芯片 UID 与原设备不匹配，未写入 Flash")
+    let ledger = try MLRecovery.ledger(uid)
+    try MLRecovery.checkLedger(ledger, uid: uid, project: cfg.project)
+    try require(ledger.isEmpty || text(ledger, "stage") == "complete", "芯片上次激活未完成，未写入新固件")
     state["uid"] = uid
     let table = try dl.send(15, accepted: [0x80, 0xb1])
     state["phase"] = "backing-up"
@@ -253,11 +264,12 @@ enum BoardFlow {
     let runtime = try wait(ct, timeout: 45) { try resolve("ml", false) }
     let at = try USBWire(runtime, download: false)
     defer { at.close() }
-    try require(try AT.imei(at, ct) == imei, "复位后 IMEI 不一致")
+    try require(try DeviceIdentity.flashIdentity(at, ct).0 == imei, "复位后 IMEI 不一致")
     let after = try AT.command(at, "AT+CGMR", ct)
     try require(after.lowercased().contains("ringhi"), "复位后无法确认 RingHi 固件")
     state["versionAfter"] = after
     state["phase"] = "verified"
+    state["verifiedAt"] = timestamp()
     try save()
     b.record("ML307H", "complete", "写入、自动激活和复位身份核验通过")
     b.change {

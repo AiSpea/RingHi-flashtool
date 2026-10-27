@@ -209,7 +209,7 @@ def test_certificate_failure_never_weakens_verification_or_retries_post(fake):
     assert all(c[2].get("verify", True) for c in fake.calls)
 
 
-def test_unsent_activation_can_resume_but_old_ambiguous_records_stay_blocked(
+def test_activation_can_resume_but_incomplete_context_stays_blocked(
     tmp_path, monkeypatch
 ):
     from ringhi.account import activate, Prepared, retryable_activation
@@ -281,8 +281,10 @@ def test_unsent_activation_can_resume_but_old_ambiguous_records_stay_blocked(
 
 
 @pytest.mark.parametrize("wrong_uid", [False, True])
+@pytest.mark.parametrize("stage", ["key-requesting", "device-writing", "third-party-requesting", "third-party-writing", "reporting"])
+@pytest.mark.parametrize("already_download", [False, True])
 def test_activation_only_recovery_never_rewrites_firmware(
-    tmp_path, monkeypatch, wrong_uid
+    tmp_path, monkeypatch, wrong_uid, stage, already_download
 ):
     from ringhi import modem
 
@@ -298,11 +300,12 @@ def test_activation_only_recovery_never_rewrites_firmware(
     storage.save_json(
         tmp_path / "activation" / (prior["uid"] + ".json"),
         dict(
-            stage="key-requesting",
+            stage=stage,
+            uid=prior["uid"],
             device_written=False,
             project_id=188,
             session=prior["backup"],
-            network={"delivery": "not-sent"},
+            network={"delivery": "unknown"},
         ),
     )
     operations = []
@@ -349,13 +352,13 @@ def test_activation_only_recovery_never_rewrites_firmware(
     account = SimpleNamespace(project=188, choose_route=lambda *a: None)
     if wrong_uid:
         with pytest.raises(OSError, match="UID"):
-            modem.resume_activation(board, cfg, None, account, None, prior)
+            modem.resume_activation(board, cfg, None, account, None, prior, already_download=already_download)
         assert "activate" not in operations
     else:
-        modem.resume_activation(board, cfg, None, account, None, prior)
+        modem.resume_activation(board, cfg, None, account, None, prior, already_download=already_download)
         assert operations == [
             "verify-backups",
-            "enter-download",
+            *([] if already_download else ["enter-download"]),
             "ram-loader",
             "activate",
             "reset",
@@ -538,3 +541,82 @@ def test_recent_batch_permission_does_not_requery_on_insert(fake):
     fake.replies = [Response(200, b'{"code":200,"data":[{"project_id":188}]}')]
     a.ensure_authorized(force=True)
     assert len(posts(fake)) == 1
+
+
+def test_healthy_connection_reused_exclusively_across_workers(fake):
+    t = network.Transport()
+    def work():
+        call(t, 'projects')
+        t.release_current()
+    for _ in range(4):
+        worker = threading.Thread(target=work)
+        worker.start(); worker.join(2)
+        assert not worker.is_alive()
+    assert len(fake.sessions) == 1 and len(posts(fake)) == 4
+    assert not fake.sessions[0].closed
+    t.close()
+    assert fake.sessions[0].closed and not t.idle
+
+
+def test_failed_connection_not_returned_to_reuse_pool(fake):
+    t = network.Transport()
+    fake.replies = [requests.ReadTimeout('ambiguous')]
+    with pytest.raises(network.NetworkError):
+        call(t)
+    t.release_current()
+    assert not t.idle and fake.sessions[0].closed
+    call(t)
+    assert len(fake.sessions) == 2
+
+
+def test_checked_out_connection_cannot_be_used_by_second_worker(fake):
+    t = network.Transport()
+    call(t); first = t.session(); t.release_current()
+    barrier = threading.Barrier(2)
+    ids = []
+    def work():
+        call(t)
+        ids.append(id(t.session()))
+        barrier.wait(timeout=2)
+        t.release_current()
+    workers = [threading.Thread(target=work) for _ in range(2)]
+    for w in workers: w.start()
+    for w in workers: w.join(3)
+    assert len(set(ids)) == 2 and id(first) in ids
+    t.close()
+
+
+def test_account_cleanup_keeps_successful_connection_for_next_stage(fake):
+    from ringhi.account import Account
+    a = Account()
+    fake.replies = [Response(200,b'{"code":200,"data":[{"project_id":188}]}')]
+    a.project = 188
+    a.ensure_authorized()
+    a.close_current()
+    assert len(a.transport.idle) == 1 and not fake.sessions[0].closed
+    a.ensure_authorized()
+    assert len(posts(fake)) == 1
+    a.close()
+
+
+def test_cancel_does_not_wait_for_another_boards_network(fake):
+    from ringhi.account import Account
+    a=Account();cancel=Cancel();started=threading.Event();stopped=threading.Event()
+    def worker():
+        started.set()
+        try:a.ensure_authorized(cancel)
+        except Cancelled:stopped.set()
+    with a.auth_lock:
+        t=threading.Thread(target=worker);t.start();assert started.wait(1)
+        cancel.cancel()
+        assert stopped.wait(1)
+    t.join(1)
+    assert not posts(fake)
+
+
+def test_incomplete_response_after_success_never_reenters_pool(fake):
+    t=network.Transport();call(t)
+    fake.replies=[Response(data=b'x'*(1024*1024+1))]
+    with pytest.raises(network.NetworkError,match='响应过大'):call(t)
+    t.release_current()
+    assert not t.idle and fake.sessions[0].closed

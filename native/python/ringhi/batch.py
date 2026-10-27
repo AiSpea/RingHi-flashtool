@@ -6,6 +6,7 @@ import copy, threading, time, uuid
 from . import storage, ports, esp, modem, production, __version__
 from .storage import Cancel, Cancelled, atomic, save_json, csv_bytes, now
 from .network import wait_network
+from .product import SIM_ESIM, PRODUCTS, validate
 
 
 @dataclass
@@ -18,6 +19,7 @@ class Config:
     limit: int = 2
     image: bytes = b""
     package: object = None
+    product_type: str = SIM_ESIM
 
 
 class Board:
@@ -82,7 +84,8 @@ class Batch:
     def __init__(self, cfg, account, prepared, csv, scanner=ports.scan, execute=None):
         if cfg.mode != "esp" and not prepared:
             raise ValueError("请先准备本批次授权")
-        self.cfg = cfg
+        validate(cfg.product_type)
+        self.cfg = copy.copy(cfg)
         self.account = account
         self.prepared = prepared
         self.csv = Path(csv)
@@ -112,6 +115,7 @@ class Batch:
         save_json(
             self.folder / "batch.json",
             {
+                "productType": cfg.product_type,
                 "mode": cfg.mode,
                 "production": cfg.production,
                 "projectId": account.project,
@@ -165,6 +169,8 @@ class Batch:
                     self.sequence += 1
                     b = Board(self.sequence, hub, group)
                     b.update(
+                        productType=self.cfg.product_type,
+                        productName=PRODUCTS[self.cfg.product_type],
                         espFirmware=self.cfg.esp_path.name,
                         mlFirmware=self.cfg.ml_path.name,
                     )
@@ -266,7 +272,7 @@ class Batch:
             )
             b.update(mac=mac, espState="MAC 已确认")
         if cfg.mode != "esp":
-            modem.preflight(b, cfg, lambda mode: self.resolve(b, mode))
+            modem.preflight(b, cfg, lambda mode: self.resolve(b, mode), self.account.project)
             try:
                 b.update(result="等待授权", reason="芯片身份已确认，检查本批次授权")
                 wait_network(
@@ -335,6 +341,9 @@ class Batch:
             def changed(r):
                 b.update(
                     production=r.reason,
+                    cardCheck=r.card,
+                    deviceStage=r.raw_stage,
+                    deviceSim=r.raw_sim,
                     cloud="登记和报告上传成功"
                     if r.ready
                     else "已登记 · 等待报告上传"
@@ -345,7 +354,7 @@ class Batch:
                     reason=r.reason,
                 )
 
-            r = production.run(lambda: self.resolve(b, "esp"), c, changed)
+            r = production.run(lambda: self.resolve(b, "esp"), c, changed, cfg.product_type)
             if not r.ready:
                 raise OSError(r.reason)
 
