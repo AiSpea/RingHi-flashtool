@@ -130,6 +130,16 @@ struct Workspace: View {
       nav("history", "生产记录", "clock.arrow.circlepath")
       nav("about", "说明与更新", "info.circle")
       Spacer()
+      if let release = store.updateRelease {
+        Button(action: store.installUpdate) {
+          VStack(alignment: .leading, spacing: 6) {
+            Label("新版本 " + release.version, systemImage: "arrow.down.circle.fill").font(.system(size: 13, weight: .semibold))
+            Text(store.updating ? store.updateStatus : store.canInstallUpdate ? "点击更新并重启" : "停止接收并等待任务完成后更新")
+              .font(.system(size: 11)).fixedSize(horizontal: false, vertical: true)
+          }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.12)).clipShape(RoundedRectangle(cornerRadius: 10))
+        }.buttonStyle(.plain).foregroundColor(.mint).disabled(!store.canInstallUpdate).padding(.bottom, 18)
+      }
       Label(store.testing ? "软件验证 · 未操作实物" : "本地运行", systemImage: "circle.fill").font(
         .system(size: 11)
       ).foregroundColor(Color.mint)
@@ -194,12 +204,12 @@ struct Workspace: View {
             ActionButton(title: "停止接收", icon: "pause", action: store.stop)
           } else if store.batch != nil {
             ActionButton(title: "继续接收", icon: "play", action: store.resume).disabled(
-              !store.batch!.error.isEmpty)
+              !store.batch!.error.isEmpty || store.updating || store.closing)
           }
           ActionButton(
             title: store.starting ? "检查配置…" : "开启新批次", icon: "plus", primary: true,
             action: store.start
-          ).disabled(store.busy || store.accepting || store.starting)
+          ).disabled(store.locked)
         }
         if !store.csvPath.isEmpty {
           HStack(alignment: .top) {
@@ -349,9 +359,15 @@ struct Workspace: View {
         Text("RingHi · macOS 原生版 \(Disk.version)")
         Text("原生 SwiftUI / AppKit 界面。ESP32 使用乐鑫官方工具，ML307H 自动备份并激活。账号保存在系统钥匙串，CSV 与备份保存到你选择的位置。")
           .foregroundColor(.muted)
-        Text("当前原生版通过安装包覆盖更新，保留账号、CSV 和备份；自动更新尚未接入。").font(.system(size: 12)).foregroundColor(
+        Text("自动检查 Mac 新版本；点击更新后保存 CSV、覆盖原应用并自动重启，保留账号、配置与生产记录。系统可能要求确认钥匙串访问。").font(.system(size: 12)).foregroundColor(
           .muted)
+        Text(store.updateStatus).font(.system(size: 12)).foregroundColor(.teal).textSelection(.enabled)
         HStack {
+          Button(store.checkingUpdate ? "检查中…" : "检查更新", action: store.checkUpdate)
+            .disabled(store.checkingUpdate || store.updating || store.closing)
+          if store.updateRelease != nil {
+            Button(store.updating ? "更新中…" : "更新并重启", action: store.installUpdate).disabled(!store.canInstallUpdate)
+          }
           Button("打开批次记录目录") {
             try? FileManager.default.createDirectory(
               at: Disk.root.appendingPathComponent("batches"), withIntermediateDirectories: true)

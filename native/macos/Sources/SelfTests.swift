@@ -304,6 +304,7 @@ enum SelfTests {
   static func run() throws {
     Disk.root = URL(fileURLWithPath: "/tmp/ringhi-native-tests-" + UUID().uuidString)
     print("Isolated evidence: " + Disk.root.path)
+    try UpdateTests.run()
     try recoveryChecks()
     try aliasRecoveryChecks()
     try connectionPoolChecks()

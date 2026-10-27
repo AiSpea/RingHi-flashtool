@@ -30,13 +30,21 @@ final class Store: ObservableObject {
   @Published var configExpanded = true
   @Published var scanText = "正在读取 USB 设备"
   @Published var selection = "batch"
+  @Published var updateRelease: MacRelease?
+  @Published var updateStatus = "启动后自动检查更新"
+  @Published var checkingUpdate = false
+  @Published var updating = false
+  var updateCancellation: Cancellation?
+  var pendingUpdate: (UpdatePlan, URL)?
+  private var updateTimer: Timer?
   var batch: Batch?
   var preparation: Cancellation?
   let spark = Spark()
   var csvDirectory = ""
   private var inventoryTimer: Timer?
   let testing: Bool
-  var locked: Bool { starting || busy || accepting }
+  var locked: Bool { starting || busy || accepting || updating || closing }
+  var canInstallUpdate: Bool { !locked && !loginBusy && !checkingUpdate }
   var connected: [Board] { rows.filter { $0.state.connected } }
   var disconnected: [Board] { rows.filter { !$0.state.connected } }
   init(testing: Bool = false) {
@@ -47,6 +55,8 @@ final class Store: ObservableObject {
         self?.scan()
       }
       scan()
+      updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in self?.checkUpdate() }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.checkUpdate() }
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.loginDefault() }
     }
   }
@@ -197,7 +207,7 @@ final class Store: ObservableObject {
     } catch { notice = "配置保存失败：" + error.localizedDescription }
   }
   func start() {
-    guard !starting, !busy, !closing else { return }
+    guard !starting, !busy, !closing, !updating else { return }
     if accepting {
       notice = "请先停止接收，再开启新批次"
       return
@@ -291,6 +301,7 @@ final class Store: ObservableObject {
     notice = "已停止接收新设备，正在执行的任务继续收尾。"
   }
   func resume() {
+    guard !updating, !closing, !starting else { return }
     do {
       try batch?.resume()
       refresh()
@@ -310,12 +321,61 @@ final class Store: ObservableObject {
       notice = "CSV 已导出：" + url.path
     } catch { notice = "导出失败：" + error.localizedDescription }
   }
+  func checkUpdate() {
+    guard !testing, !checkingUpdate, !updating, !closing else { return }
+    checkingUpdate = true
+    updateStatus = "正在检查 Mac 更新…"
+    let ct = Cancellation(); updateCancellation = ct
+    DispatchQueue.global().async {
+      do {
+        let release = try MacUpdates.check(ct: ct)
+        DispatchQueue.main.async {
+          self.checkingUpdate = false
+          guard !self.closing else { return }
+          self.updateRelease = release
+          self.updateStatus = release.map { "发现新版本 " + $0.version } ?? "当前已是最新版本"
+        }
+      } catch {
+        DispatchQueue.main.async {
+          self.checkingUpdate = false
+          if !self.closing { self.updateStatus = "检查未完成，可重试：" + error.localizedDescription }
+        }
+      }
+    }
+  }
+  func installUpdate() {
+    guard !testing, canInstallUpdate, let release = updateRelease else { return }
+    updating = true
+    let ct = Cancellation(); updateCancellation = ct
+    DispatchQueue.global().async {
+      do {
+        let source = try MacUpdates.stage(release, ct: ct) { status in
+          DispatchQueue.main.async { if !self.closing { self.updateStatus = status } }
+        }
+        try ct.check()
+        let plan = try UpdateInstaller.makePlan(source: source, destination: Bundle.main.bundleURL, version: release.version)
+        DispatchQueue.main.async {
+          guard !self.closing, !ct.cancelled else { return }
+          self.pendingUpdate = plan
+          self.updateStatus = "校验通过，正在保存 CSV 并重启升级…"
+          NSApp.terminate(nil)
+        }
+      } catch {
+        DispatchQueue.main.async {
+          self.updating = false; self.pendingUpdate = nil
+          if !self.closing { self.updateStatus = "更新未完成，原应用未改动：" + error.localizedDescription }
+        }
+      }
+    }
+  }
+
   func finish(_ completion: @escaping (Bool) -> Void) {
     guard !closing else {
       completion(false)
       return
     }
     closing = true
+    updateCancellation?.cancel()
     preparation?.cancel()
     notice = "正在停止设备任务并保存 CSV…"
     let current = batch

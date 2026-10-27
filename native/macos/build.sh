@@ -15,7 +15,7 @@ cp Resources/* "$APP/Contents/Resources/"
 python3 - "$APP/Contents/Info.plist" <<'PY'
 import plistlib,sys
 with open(sys.argv[1], 'wb') as f:
- plistlib.dump(dict(CFBundleIdentifier='com.aispea.ringhi.flasher',CFBundleName='RingHi Flasher',CFBundleDisplayName='RingHi Flasher',CFBundleExecutable='RingHi Flasher',CFBundleShortVersionString='0.4.8',CFBundleVersion='408',CFBundlePackageType='APPL',CFBundleIconFile='RingHi.icns',LSMinimumSystemVersion='13.0',NSHighResolutionCapable=True,NSPrincipalClass='NSApplication',NSHumanReadableCopyright='RingHi'),f)
+ plistlib.dump(dict(CFBundleIdentifier='com.aispea.ringhi.flasher',CFBundleName='RingHi Flasher',CFBundleDisplayName='RingHi Flasher',CFBundleExecutable='RingHi Flasher',CFBundleShortVersionString='0.4.9',CFBundleVersion='409',CFBundlePackageType='APPL',CFBundleIconFile='RingHi.icns',LSMinimumSystemVersion='13.0',NSHighResolutionCapable=True,NSPrincipalClass='NSApplication',NSHumanReadableCopyright='RingHi'),f)
 PY
 xattr -cr "$APP"
 codesign --force --sign - "$APP"

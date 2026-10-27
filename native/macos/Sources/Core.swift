@@ -75,7 +75,7 @@ extension Data {
   }
 }
 enum Disk {
-  static let version = "0.4.8"
+  static let version = "0.4.9"
   static let legacy = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
     "Library/Application Support/ringhi-flasher")
   static var root = legacy.appendingPathComponent("native-macos")

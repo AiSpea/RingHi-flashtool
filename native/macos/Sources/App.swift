@@ -39,6 +39,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     editItem.submenu = edit
     menu.addItem(editItem)
     NSApp.mainMenu = menu
+    if let index = CommandLine.arguments.firstIndex(of: "--update-complete"), CommandLine.arguments.count > index + 1 {
+      UpdateInstaller.acknowledge(URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+    }
     if testing { do { try prepareFixture() } catch { store.notice = error.localizedDescription } }
   }
   @objc func about() { store.selection = "about" }
@@ -59,7 +62,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       alert.addButton(withTitle: "停止并关闭")
       if alert.runModal() != .alertSecondButtonReturn { return .terminateCancel }
     }
-    store.finish { ok in sender.reply(toApplicationShouldTerminate: ok) }
+    store.finish { ok in
+      guard ok else { store.updating = false; store.pendingUpdate = nil; sender.reply(toApplicationShouldTerminate: false); return }
+      guard let (plan, file) = store.pendingUpdate else { sender.reply(toApplicationShouldTerminate: true); return }
+      DispatchQueue.global().async {
+        do {
+          try UpdateInstaller.launch(plan, file: file)
+          DispatchQueue.main.async { sender.reply(toApplicationShouldTerminate: true) }
+        } catch {
+          DispatchQueue.main.async {
+            store.closing = false; store.updating = false; store.pendingUpdate = nil
+            store.updateStatus = "未退出：" + error.localizedDescription
+            sender.reply(toApplicationShouldTerminate: false)
+          }
+        }
+      }
+    }
     return .terminateLater
   }
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool
@@ -71,6 +89,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     store.espPath = "软件验证 / ESP32.bin"
     store.mlPath = "软件验证 / ML307H.pkg"
     store.backupPath = Disk.root.appendingPathComponent("备份").path
+    store.updateRelease = MacRelease(version: "0.4.10", archive: URL(string: "https://github.com/AiSpea/RingHi-flashtool/releases/download/mac-v0.4.10/RingHi-Native-0.4.10-mac-arm64.zip")!, checksums: URL(string: "https://github.com/AiSpea/RingHi-flashtool/releases/download/mac-v0.4.10/SHA256SUMS.txt")!)
+    store.updateStatus = "软件验证：发现新版本 0.4.10（不会下载）"
     store.configExpanded = false
     store.notice = "隔离的软件验证数据；不会打开设备、登录或请求授权。"
     store.scanText = "软件验证：模拟任务状态"
@@ -107,6 +127,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     setenv("PYTHONUTF8", "1", 1)
     setenv("NO_COLOR", "1", 1)
     let arguments = CommandLine.arguments
+    for mode in ["--apply-update", "--replace-update"] {
+      if let index = arguments.firstIndex(of: mode), arguments.count > index + 1 {
+        do { try UpdateInstaller.apply(URL(fileURLWithPath: arguments[index + 1]), privileged: mode == "--replace-update"); exit(0) }
+        catch {
+          if mode == "--apply-update" {
+            let app = NSApplication.shared; app.setActivationPolicy(.accessory)
+            let alert = NSAlert(); alert.messageText = "RingHi 更新未完成"
+            alert.informativeText = error.localizedDescription + "\n原账号和 CSV 保持不变，可以重新打开应用后重试。"
+            alert.runModal()
+          }
+          fputs(error.localizedDescription + "\n", stderr); exit(1)
+        }
+      }
+    }
+    if let index = arguments.firstIndex(of: "--verify-update-archive"), arguments.count > index + 1 {
+      do { try MacUpdates.validateZIP(Data(contentsOf: URL(fileURLWithPath: arguments[index + 1]))); print("PASS: update ZIP paths and limits"); exit(0) }
+      catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+    }
+    if arguments.contains("--stage-mac-update") {
+      do {
+        let ct = Cancellation()
+        guard let release = try MacUpdates.check(current: "0.0.0", ct: ct) else { throw Failure("没有可下载的 Mac 更新") }
+        let app = try MacUpdates.stage(release, ct: ct) { message in print(message); fflush(stdout) }
+        print("STAGED " + app.path); exit(0)
+      } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+    }
+    if arguments.contains("--check-mac-update") {
+      do {
+        let current = ProcessInfo.processInfo.environment["RINGHI_CHECK_FROM_VERSION"] ?? Disk.version
+        let release = try MacUpdates.check(current: current, ct: Cancellation())
+        print(release.map { "AVAILABLE " + $0.version + " " + $0.archive.absoluteString } ?? "CURRENT " + current)
+        exit(0)
+      } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+    }
     if arguments.contains("--self-test") {
       do {
         try SelfTests.run()
