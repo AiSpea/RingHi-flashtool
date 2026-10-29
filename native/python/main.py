@@ -40,6 +40,10 @@ def main():
             from ringhi.recovery_check import run
             flag = "--recovery-test"
         try:
+            if flag == "--hardware-test":
+                count = int(sys.argv[sys.argv.index("--hardware-boards") + 1]) if "--hardware-boards" in sys.argv else 1
+                return run(sys.argv[sys.argv.index(flag) + 1], count,
+                           "--hardware-flash-only" in sys.argv)
             return run(sys.argv[sys.argv.index(flag) + 1])
         finally:
             if handle:

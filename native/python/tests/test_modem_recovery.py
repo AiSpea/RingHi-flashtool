@@ -281,3 +281,115 @@ def test_same_windows_995_during_flash_command_still_fails(clock):
     d=Download(NS(write=sent.append,read=read),Cancel())
     with pytest.raises(serial.SerialException):d.send(2,b'flash-data')
     assert d.broken and len(sent)==1
+
+
+def factory_driver_error(code=22):
+    import serial
+    return serial.SerialException(
+        f"ClearCommError failed (PermissionError(13, '设备不识别此命令。', None, {code}))")
+
+
+@pytest.mark.parametrize('stage', ['write', 'read'])
+@pytest.mark.parametrize('code', [22, 1, 87, 995, 1167])
+def test_reset_transport_error_is_uncertain_not_replayed(stage, code, clock):
+    from ringhi.protocol import Download
+    sent=[]
+    def write(data):
+        sent.append(data)
+        if stage=='write':raise factory_driver_error(code)
+    def read():raise factory_driver_error(code)
+    d=Download(NS(write=write,read=read),Cancel())
+    assert d.reset() is False
+    assert len(sent)==1 and str(code) in d.reset_detail
+    assert not d.broken  # No Flash command failed; caller must verify boot.
+
+
+@pytest.mark.parametrize('code', [22, 1, 87, 995])
+def test_same_driver_error_in_flash_remains_fatal(code, clock):
+    from ringhi.protocol import Download
+    sent=[]
+    def read():raise factory_driver_error(code)
+    d=Download(NS(write=sent.append,read=read),Cancel())
+    with pytest.raises(OSError):d.send(2,b'flash-data')
+    assert d.broken and len(sent)==1
+
+
+def test_reset_invalid_ack_still_fails(clock):
+    from ringhi.protocol import Download,frame
+    bad=bytearray(frame(0x80,b'',False));bad[-2]^=1
+    with pytest.raises(OSError,match='校验失败'):
+        Download(NS(write=lambda b:None,read=lambda:bad),Cancel()).reset()
+
+
+def test_reset_cancel_is_not_swallowed_as_transport_error(clock):
+    from ringhi.protocol import Download
+    c=Cancel()
+    def read():
+        c.cancel();raise factory_driver_error()
+    with pytest.raises(Cancelled):Download(NS(write=lambda b:None,read=read),c).reset()
+
+
+@pytest.mark.parametrize('outcome', ['booted', 'missing', 'wrong-imei', 'wrong-firmware'])
+def test_factory_reset_22_requires_real_boot_before_success(recovery,clock,monkeypatch,outcome):
+    from ringhi.protocol import Download
+    prior,board,cfg,account,updates=recovery
+    sent=[];saved=[]
+    def read():raise factory_driver_error()
+    dl=Download(NS(write=sent.append,read=read),board.cancel)
+    modem.reset_for_verification(dl,prior,lambda:saved.append(dict(prior)),lambda s:None)
+    assert len(sent)==1 and saved[-1]['resetReceipt']=='unconfirmed'
+    assert 'None, 22' in saved[-1]['resetDetail']
+    def opening(*a,**k):
+        if outcome=='missing':raise wire.PortOpenTimeout('runtime absent')
+        return nullcontext(object())
+    monkeypatch.setattr(modem,'open_ready',opening)
+    monkeypatch.setattr(modem,'identity',lambda *a,**k:(
+        '2'*15 if outcome=='wrong-imei' else prior['imei'],
+        'stock' if outcome=='wrong-firmware' else 'RingHi'))
+    monkeypatch.setattr(modem,'activate',lambda *a:pytest.fail('no activation replay'))
+    if outcome=='booted':
+        modem.finish_verification(board,prior,None)
+        assert prior['phase']=='verified' and updates[-1]['mlProgress']==100
+    else:
+        with pytest.raises(OSError):modem.finish_verification(board,prior,None)
+        assert prior['phase']=='awaiting-verification'
+        assert all(u.get('mlProgress')!=100 for u in updates)
+
+
+def test_runtime_driver_22_closes_old_handle_and_resolves_again(clock,monkeypatch):
+    reads=[];closed=[];paths=[]
+    class W:
+        def __enter__(self):return self
+        def __exit__(self,*a):closed.append(True)
+    def opening(resolve,*a,**k):paths.append(resolve().path);return W()
+    def identity(*a,**k):
+        reads.append(1)
+        if len(reads)<3:raise factory_driver_error()
+        return '1'*15,'RingHi'
+    monkeypatch.setattr(modem,'open_ready',opening)
+    monkeypatch.setattr(modem,'identity',identity)
+    assert modem.verify_runtime(lambda m:NS(path=f'COM{len(paths)+1}'),'1'*15,Cancel(),lambda s:None)=='RingHi'
+    assert paths==['COM1','COM2','COM3'] and len(closed)==3
+
+
+def test_persistent_runtime_driver_error_times_out_not_success(clock,monkeypatch):
+    monkeypatch.setattr(modem,'open_ready',lambda *a,**k:nullcontext(object()))
+    def identity(*a,**k):raise factory_driver_error()
+    monkeypatch.setattr(modem,'identity',identity)
+    with pytest.raises(OSError,match='启动核验超时.*ClearCommError'):
+        modem.verify_runtime(None,'1'*15,Cancel(),lambda s:None)
+    assert 60<=clock.now<61
+
+
+def test_four_parallel_resets_keep_independent_outcomes():
+    from concurrent.futures import ThreadPoolExecutor
+    from ringhi.protocol import Download,frame
+    def run(index):
+        def read():
+            if index%2:raise factory_driver_error()
+            return frame(0x80,b'',False)
+        d=Download(NS(write=lambda b:None,read=read),Cancel())
+        return d.reset(),d.reset_detail
+    with ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(run,range(4)))
+    assert [r[0] for r in results]==[True,False,True,False]
+    assert all(bool(detail)==(i%2==1) for i,(_,detail) in enumerate(results))

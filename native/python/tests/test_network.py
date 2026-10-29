@@ -312,6 +312,7 @@ def test_activation_only_recovery_never_rewrites_firmware(
 
     class Device:
         broken = False
+        reset_detail = ""
 
         def __init__(self, *a):
             pass

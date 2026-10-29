@@ -127,3 +127,64 @@ def test_verify_transport_recovery_only_reads_and_checks_mac(monkeypatch):
     monkeypatch.setattr(esp,'run',run)
     assert esp.read_operation(lambda:SimpleNamespace(path='COM4'),'verify-flash',[],Cancel(),lambda *a:None,lambda *a:None,20,expected=MAC)=='verified'
     assert calls==['verify-flash','flash-id','verify-flash']
+
+
+COMPLETE_WRITE = ('Wrote 16777216 bytes (3255619 compressed) at 0x00000000 in 30.3 seconds (4435.8 kbit/s).\n'
+                  'Verifying written data...\nStaying in flasher stub.\n'
+                  "ERROR: A serial exception error occurred: Cannot configure port. PermissionError(13, '设备不识别此命令。', None, 22)")
+FULL_DIGEST = 'Verifying 0x1000000 (16777216) bytes at 0x00000000 in flash\nVerification successful (digest matched).'
+
+
+def test_completed_write_driver_22_only_reidentifies_and_verifies(monkeypatch,tmp_path):
+    file,raw=image_file(tmp_path);calls=[];progress=[]
+    def run(port,cmd,*a,**kw):
+        calls.append((port,cmd))
+        if cmd=='write-flash':raise esp.ToolFailure('serial failure',COMPLETE_WRITE)
+        return IDENTITY if cmd=='flash-id' else FULL_DIGEST
+    monkeypatch.setattr(esp,'run',run)
+    esp.flash(lambda:SimpleNamespace(path='COM'+str(10+len(calls))),file,raw,MAC,Cancel(),lambda n,s:progress.append(n),lambda s:None)
+    assert calls==[('COM10','write-flash'),('COM11','flash-id'),('COM12','verify-flash')]
+    assert progress[-1]==100 and 96 in progress and 97 in progress
+
+
+@pytest.mark.parametrize('change',[
+    lambda t:t.replace('16777216','4096'),
+    lambda t:t.replace('0x00000000','0x00001000'),
+    lambda t:t.replace('Verifying written data...',''),
+    lambda t:t+'\nMD5 of file does not match data in flash!',
+    lambda t:t+'\nWrite failed, the written flash region is empty.',
+    lambda t:t+'\nWriting at 0x00000000 1%',
+    lambda t:t+'\n'+t,
+])
+def test_incomplete_or_mismatch_write_not_recovered(change):
+    assert not esp.verification_interrupted(esp.ToolFailure('serial failure',change(COMPLETE_WRITE)))
+
+
+def test_cleanup_failure_not_converted_to_verify():
+    assert not esp.verification_interrupted(esp.PortCleanupError(COMPLETE_WRITE))
+
+
+@pytest.mark.parametrize('failure',['wrong-mac','bad-digest','cancel','missing-port','snapshot-changed'])
+def test_write_completion_cannot_bypass_verification_gates(monkeypatch,tmp_path,failure):
+    file,raw=image_file(tmp_path);commands=[];progress=[];cancel=Cancel()
+    def run(port,cmd,*a,**kw):
+        commands.append(cmd)
+        if cmd=='write-flash':
+            if failure=='cancel':cancel.cancel()
+            if failure=='snapshot-changed':file.write_bytes(b'changed')
+            raise esp.ToolFailure('serial failure',COMPLETE_WRITE)
+        if cmd=='flash-id':return IDENTITY.replace(MAC,'AA:BB:CC:DD:EE:FF') if failure=='wrong-mac' else IDENTITY
+        return 'Verification failed.' if failure=='bad-digest' else FULL_DIGEST
+    monkeypatch.setattr(esp,'run',run)
+    def resolve():
+        if commands and failure=='missing-port':raise Cancelled('original connection gone')
+        return SimpleNamespace(path='COM4')
+    with pytest.raises((OSError,Cancelled)):
+        esp.flash(resolve,file,raw,MAC,cancel,lambda n,s:progress.append(n),lambda s:None)
+    assert commands.count('write-flash')==1 and 100 not in progress
+    if failure in ('wrong-mac','cancel','missing-port','snapshot-changed'):assert 'verify-flash' not in commands
+
+
+def test_full_write_generic_tool_exit_without_transport_error_stays_failure():
+    text=COMPLETE_WRITE.split('ERROR:')[0]+'ERROR: unexpected internal failure'
+    assert not esp.verification_interrupted(esp.ToolFailure('failed',text))

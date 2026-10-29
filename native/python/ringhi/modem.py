@@ -3,6 +3,7 @@
 from pathlib import Path
 from datetime import datetime
 import struct, re, time
+import serial
 from . import storage
 from .storage import read_json, save_json, verified, sha, now
 from .wire import (open_ready, flash_identity as identity, at, PortOpenTimeout,
@@ -114,7 +115,8 @@ def verify_runtime(resolve, imei, cancel, status):
                             target="ML307 运行 AT 口（固件/激活后的启动核验）") as wire:
                 actual, version = identity(wire, cancel)
         except Exception as exc:
-            retry = isinstance(exc, (PortOpenTimeout, CommandRejected, TimeoutError))
+            retry = isinstance(exc, (PortOpenTimeout, CommandRejected, TimeoutError,
+                                     serial.SerialException))
             if not (retry or transient_open(exc) or port_disconnected(exc)):
                 raise
             if time.monotonic() >= deadline:
@@ -127,6 +129,16 @@ def verify_runtime(resolve, imei, cancel, status):
         if "ringhi" not in version.lower():
             raise OSError("复位后 RingHi 固件版本未确认")
         return version
+
+
+def reset_for_verification(dl, state, save, status):
+    """Record the reset receipt separately from independently verified boot."""
+    acknowledged = dl.reset()
+    state["resetReceipt"] = "acknowledged" if acknowledged else "unconfirmed"
+    state["resetDetail"] = dl.reset_detail
+    save()
+    status("已收到复位回执 · 等待启动身份核验" if acknowledged else
+           "复位回执未确认 · 重新识别运行口并核验启动")
 
 
 class _DownloadAppeared(Exception):
@@ -260,7 +272,11 @@ def resume_activation(board, cfg, resolve, account, prepared, prior, already_dow
                 except OSError:
                     pass
             raise
-        dl.reset()
+        def save_reset():
+            save_json(Path(prior["backup"]) / "session.json", prior)
+            save_json(storage.ROOT / "ml-intents" / (prior["imei"] + ".json"), prior)
+        reset_for_verification(dl, prior, save_reset, status)
+        board.update(mlResetReceipt=prior["resetReceipt"], mlResetDetail=prior["resetDetail"])
     finish_verification(board, prior, resolve)
 
 
@@ -512,7 +528,8 @@ def run(board, cfg, resolve, account, prepared):
         state["phase"] = "awaiting-verification"
         save()
         progress(97, "官方激活已确认 · 正在复位 ML307")
-        dl.reset()
+        reset_for_verification(dl, state, save, status)
+        board.update(mlResetReceipt=state["resetReceipt"], mlResetDetail=state["resetDetail"])
     progress(98, "已激活 · 等待启动身份核验")
     state["versionAfter"] = verify_runtime(resolve, imei, cancel, status)
     state["phase"] = "verified"

@@ -50,6 +50,7 @@ class Download:
         self.crc = True
         self.broken = False
         self.progress = progress
+        self.reset_detail = ""
 
     def send(self, cmd, data=b"", timeout=60, accepted=(0x80,)):
         if self.broken:
@@ -140,7 +141,17 @@ class Download:
     def reset(self):
         if self.broken:
             raise OSError("下载已中断，不能确认复位")
-        self.wire.write(frame(16, struct.pack("<I", 0), False))
+        self.cancel.check()
+        self.reset_detail = ""
+        try:
+            self.wire.write(frame(16, struct.pack("<I", 0), False))
+        except OSError as exc:
+            # A driver can invalidate its handle while completing this write.
+            # Do not resend an uncertain reset; only an independent runtime
+            # identity check can establish that the device actually booted.
+            self.cancel.check()
+            self.reset_detail = f"复位发送回执未确认：{type(exc).__name__}: {exc}"
+            return False
         # Keep the transport alive until the loader acknowledges or disconnects.
         # Closing immediately can cancel a queued USB transfer. A reset receipt
         # is not boot success: the caller must still verify the runtime identity.
@@ -151,10 +162,12 @@ class Download:
             try:
                 buf += self.wire.read()
             except OSError as exc:
-                from .wire import port_disconnected
-                if port_disconnected(exc):
-                    return False
-                raise
+                # Handle invalidation is driver-dependent (including Windows
+                # ClearCommError / ERROR_BAD_COMMAND 22). This exception policy
+                # belongs only to reset, never Flash writes or activation.
+                self.cancel.check()
+                self.reset_detail = f"复位回执读取中断：{type(exc).__name__}: {exc}"
+                return False
             if len(buf) > 65546:
                 raise OSError("复位回包过大")
             reply = decode(buf, False)
@@ -162,4 +175,5 @@ class Download:
                 if reply[0] != 0x80:
                     raise OSError(f"复位命令被拒绝，返回 0x{reply[0]:x}")
                 return True
+        self.reset_detail = "复位回执等待超时"
         return False

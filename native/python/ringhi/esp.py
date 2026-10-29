@@ -303,6 +303,51 @@ def digest_verified(text):
     )
 
 
+def verification_interrupted(exc):
+    """Only a completed single-image write followed by a transport failure.
+
+    esptool 5.6 prints Wrote after the final write barrier, then starts MD5.
+    A Windows driver can reject the timeout/port configuration used by MD5.
+    This permits a fresh read-only verification, never another Flash write.
+    """
+    if not isinstance(exc, ToolFailure) or not recoverable(exc):
+        return False
+    text = exc.output
+    if re.search(r"MD5 of file does not match|Write failed|Verification failed|"
+                 r"Reflashing the whole image", text, re.I):
+        return False
+    completed = list(re.finditer(
+        r"(?m)^Wrote 16777216 bytes(?: \(\d+ compressed\))? "
+        r"at 0x00000000(?: in [^\r\n]+)?\r?$", text))
+    if len(completed) != 1:
+        return False
+    tail = text[completed[0].end():]
+    return ("Verifying written data..." in tail
+            and not re.search(r"Writing at|Erasing|^Wrote ", tail, re.M))
+
+
+def verify_written(resolve, file, raw, mac, cancel, progress, log,
+                   reconnect=False):
+    """Read-only completion; bind the image and recovered port to this task."""
+    validate_image(raw)
+    if sha(Path(file).read_bytes()) != sha(raw):
+        raise OSError("本批次固件快照已改变，未继续校验")
+    if reconnect:
+        progress(96, "写入已完成 · 恢复校验连接，核对原设备 MAC")
+        identify(resolve, cancel, lambda s: progress(96, s), expected=mac,
+                 before="no-reset", log=log)
+    progress(97, "独立复核完整 16 MB MD5")
+    options = ["--flash-mode", "keep", "--flash-freq", "keep",
+               "--flash-size", "keep", "0x0", str(file)]
+    verified = read_operation(
+        resolve, "verify-flash", options, cancel, lambda s: progress(97, s),
+        log, 120, expected=mac,
+    )
+    if not digest_verified(verified):
+        raise OSError("完整 Flash MD5 未确认一致")
+    progress(100, "完整 MD5 校验通过 · esptool 5.6.0")
+
+
 def flash(resolve, file, raw, mac, cancel, progress, log):
     validate_image(raw)
     if sha(Path(file).read_bytes()) != sha(raw):
@@ -338,6 +383,18 @@ def flash(resolve, file, raw, mac, cancel, progress, log):
                          600, before="no-reset")
             break
         except OSError as exc:
+            if verification_interrupted(exc):
+                cancel.check()
+                log(f"ESP32 完整写入后的校验连接中断；仅恢复校验，不重写 Flash：{exc}")
+                try:
+                    verify_written(resolve, file, raw, mac, cancel, progress, log,
+                                   reconnect=True)
+                except OSError as recovery:
+                    raise OSError(
+                        "ESP32 固件数据已发送完成，但完整 MD5 校验未通过；"
+                        "未重复擦写，不能判定烧录成功。校验恢复结果：" + str(recovery)
+                    ) from recovery
+                return
             text = str(exc) + "\n" + getattr(exc, "output", "")
             preconnect = ("Could not open COM" in text or "Failed to connect" in text)
             started = re.search(r"Connected to|Stub running|Stub flasher running|"
@@ -349,14 +406,7 @@ def flash(resolve, file, raw, mac, cancel, progress, log):
                      before="no-reset", log=log)
     if not write_verified(result):
         raise OSError("未确认完整 16 MB 写入与 MD5，未判定成功")
-    progress(97, "独立复核完整 16 MB MD5")
-    verified = read_operation(
-        resolve, "verify-flash", options, cancel, lambda s: progress(97, s),
-        log, 120, expected=mac,
-    )
-    if not digest_verified(verified):
-        raise OSError("完整 Flash MD5 未确认一致")
-    progress(100, "完整 MD5 校验通过 · esptool 5.6.0")
+    verify_written(resolve, file, raw, mac, cancel, progress, log)
 
 
 def reset(resolve, cancel, expected=None):
