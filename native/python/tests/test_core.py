@@ -681,3 +681,30 @@ def test_device_identity_visible_before_network_wait(tmp_path, monkeypatch):
     assert events == ["esp-id", "ml-id", "network"]
     batch.prepared = None
     batch.close()
+
+
+@pytest.mark.parametrize("mode", ["esp", "runtime"])
+def test_esp_resolve_refreshes_changed_com_without_switching_chip(tmp_path, mode):
+    current=pair('A')
+    b=Batch(config(tmp_path),Account(),None,tmp_path/'out.csv',
+            scanner=lambda:(current,{'A'}),execute=lambda *a:None)
+    b.observe(current,{'A'});until(lambda:not b.busy)
+    row=b.rows[0]
+    from dataclasses import replace
+    old=b.resolve(row,mode)
+    current=[replace(p,path='COM88') if p.mode==mode else p for p in current]
+    assert b.resolve(row,mode).path=='COM88' and old.path!='COM88'
+    current=[p for p in current if p.mode!=mode]
+    with pytest.raises(ports.NotReady):b.resolve(row,mode)
+    b.close()
+
+
+def test_esp_refresh_rejects_new_connection_generation(tmp_path):
+    current=pair('A')
+    b=Batch(config(tmp_path),Account(),None,tmp_path/'out.csv',
+            scanner=lambda:(current,{'A'}),execute=lambda *a:None)
+    b.observe(current,{'A'});until(lambda:not b.busy)
+    old=b.rows[0]
+    current=pair('A',99)
+    with pytest.raises(Cancelled):b.resolve(old,'esp')
+    b.close()

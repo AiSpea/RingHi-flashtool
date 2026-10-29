@@ -162,22 +162,9 @@ enum BoardFlow {
       try Disk.save(backup.appendingPathComponent("session.json"), state)
     } else { try save() }
     if !alreadyDownload {
-      do {
-        let wire = try USBWire(resolve("ml", false), download: false)
-        defer { wire.close() }
-        try require(try DeviceIdentity.flashIdentity(wire, ct).0 == imei, "下载前 IMEI 改变")
-        _ = try AT.command(wire, "AT^AUTODL", ct, timeout: 3, disconnectOK: true)
-      }
-      try ct.sleep(2)
-      if (try? resolve("ml", true)) == nil {
-        let wire = try USBWire(resolve("ml", false), download: false)
-        defer { wire.close() }
-        try require(try DeviceIdentity.flashIdentity(wire, ct).0 == imei, "下载前 IMEI 改变")
-        _ = try AT.command(wire, "AT^RESET=normal", ct, timeout: 3, disconnectOK: true)
-      }
+      try MLConnection.enterDownload(resolve, imei: imei, ct: ct) { value in b.change { $0.mlState = value } }
     }
-    let device = try wait(ct, timeout: 25) { try resolve("ml", true) }
-    let wire = try USBWire(device, download: true)
+    let wire = try MLConnection.openUSB(resolve, download: true, ct: ct) { value in b.change { $0.mlState = value } }
     defer { wire.close() }
     let dl = Download(wire, ct)
     var weights: [String: Int] = [:]
@@ -253,29 +240,16 @@ enum BoardFlow {
     do {
       try activation.run(dl, uid, backup) { stage in b.change { $0.mlState = "授权：" + stage } }
     } catch {
-      if !dl.broken && !ct.cancelled { try? dl.reset() }
+      if !dl.broken && !ct.cancelled { _ = try? dl.reset() }
       throw error
     }
-    try dl.reset()
     state["phase"] = "awaiting-verification"
-    try save()
+    try save() // Durable activation result before a reset can disconnect USB.
+    b.change { $0.mlProgress = 97; $0.mlState = "官方激活已确认 · 正在复位 ML307" }
+    try dl.reset()
     wire.close()
-    try ct.sleep(2)
-    let runtime = try wait(ct, timeout: 45) { try resolve("ml", false) }
-    let at = try USBWire(runtime, download: false)
-    defer { at.close() }
-    try require(try DeviceIdentity.flashIdentity(at, ct).0 == imei, "复位后 IMEI 不一致")
-    let after = try AT.command(at, "AT+CGMR", ct)
-    try require(after.lowercased().contains("ringhi"), "复位后无法确认 RingHi 固件")
-    state["versionAfter"] = after
-    state["phase"] = "verified"
-    state["verifiedAt"] = timestamp()
-    try save()
+    try MLRecovery.finishVerification(b, state, resolve)
     b.record("ML307H", "complete", "写入、自动激活和复位身份核验通过")
-    b.change {
-      $0.mlProgress = 100
-      $0.mlState = "写入应答、自动激活、复位后身份通过"
-    }
   }
 }
 final class FlowErrors {

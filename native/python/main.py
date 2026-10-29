@@ -11,6 +11,9 @@ def main():
         import pytest
 
         return pytest.main([str(Path(__file__).parent / "tests"), "-q"])
+    if "--engine-test" in sys.argv:
+        from ringhi.engine_check import run
+        return run(sys.argv[sys.argv.index("--engine-test") + 1])
     # Named OS mutex prevents another native writer in the same Windows session.
     handle = None
     if sys.platform == "win32" and "--ui-test" not in sys.argv:
@@ -29,6 +32,21 @@ def main():
                 None, "RingHi 已在运行，请使用已打开的窗口。", "RingHi", 0
             )
             return 1
+    if "--recovery-test" in sys.argv or "--hardware-test" in sys.argv:
+        if "--hardware-test" in sys.argv:
+            from ringhi.hardware_check import run
+            flag = "--hardware-test"
+        else:
+            from ringhi.recovery_check import run
+            flag = "--recovery-test"
+        try:
+            return run(sys.argv[sys.argv.index(flag) + 1])
+        finally:
+            if handle:
+                kernel.ReleaseMutex.argtypes = [ctypes.c_void_p]
+                kernel.ReleaseMutex(handle)
+                kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+                kernel.CloseHandle(handle)
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QFont, QFontDatabase
     from ringhi import storage

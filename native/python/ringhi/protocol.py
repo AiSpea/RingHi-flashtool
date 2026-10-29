@@ -141,3 +141,25 @@ class Download:
         if self.broken:
             raise OSError("下载已中断，不能确认复位")
         self.wire.write(frame(16, struct.pack("<I", 0), False))
+        # Keep the transport alive until the loader acknowledges or disconnects.
+        # Closing immediately can cancel a queued USB transfer. A reset receipt
+        # is not boot success: the caller must still verify the runtime identity.
+        deadline = time.monotonic() + 3
+        buf = b""
+        while time.monotonic() < deadline:
+            self.cancel.check()
+            try:
+                buf += self.wire.read()
+            except OSError as exc:
+                from .wire import port_disconnected
+                if port_disconnected(exc):
+                    return False
+                raise
+            if len(buf) > 65546:
+                raise OSError("复位回包过大")
+            reply = decode(buf, False)
+            if reply:
+                if reply[0] != 0x80:
+                    raise OSError(f"复位命令被拒绝，返回 0x{reply[0]:x}")
+                return True
+        return False

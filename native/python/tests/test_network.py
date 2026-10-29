@@ -620,3 +620,63 @@ def test_incomplete_response_after_success_never_reenters_pool(fake):
     with pytest.raises(network.NetworkError,match='响应过大'):call(t)
     t.release_current()
     assert not t.idle and fake.sessions[0].closed
+
+
+def test_batch_permission_survives_long_idle_without_polling(fake):
+    from ringhi.account import Account
+    a = Account(); a.username = 'fixture'; a.project = 188; a.token = 'VALID'
+    a.note_authorized(); a.authorized_at -= 72 * 3600
+    for _ in range(20):
+        a.ensure_authorized()
+    assert not posts(fake)
+
+
+@pytest.mark.parametrize('field,value', [('username', 'changed'), ('project', 184), ('token', 'CHANGED')])
+def test_permission_cache_bound_to_account_project_and_session(fake, field, value):
+    from ringhi.account import Account
+    a = Account(); a.username = 'fixture'; a.project = 188; a.token = 'VALID'
+    a.note_authorized(); setattr(a, field, value)
+    fake.replies = [Response(200, ('{"code":200,"data":[{"project_id":%s}]}' % a.project).encode())]
+    a.ensure_authorized()
+    assert len(posts(fake)) == 1
+
+
+def test_explicit_expired_activation_session_recovers_once(fake, monkeypatch):
+    from ringhi import account as module
+    a = module.Account(); a.username = 'fixture'; a.project = 188; a.token = 'OLD'
+    a.note_authorized()
+    monkeypatch.setattr(module, 'load_credentials', lambda: {'username': 'fixture'})
+    fake.replies = [
+        Response(200, b'{"code":401}'),  # activation explicitly rejected
+        Response(200, b'{"code":401}'),  # read-only permission also rejects
+        Response(200, b'{"code":200,"data":{"token":"NEW"}}'),
+        Response(200, b'{"code":200,"data":[{"project_id":188}]}'),
+        Response(200, b'{"code":200,"data":{"cdkey":"fixture","has3rd":false}}'),
+    ]
+    result = a.call('activation-key', {'project_id': 188, 'cpucode': 'fixture'})
+    assert result['cdkey'] == 'fixture' and a.token == 'NEW'
+    assert len(posts(fake)) == 5
+    a.ensure_authorized()
+    assert len(posts(fake)) == 5
+
+
+def test_ambiguous_activation_does_not_refresh_or_replay(fake):
+    from ringhi.account import Account
+    a = Account(); a.note_authorized()
+    fake.replies = [requests.ReadTimeout('response lost')]
+    with pytest.raises(network.NetworkError):
+        a.call('activation-key', {'cpucode': 'fixture'})
+    assert len(posts(fake)) == 1
+
+
+def test_failed_explicit_permission_refresh_cannot_leave_cached_access(fake):
+    from ringhi.account import Account
+    a = Account(); a.project = 188; a.token = 'VALID'; a.note_authorized()
+    fake.replies = [Response(200, b'{"code":200,"data":[]}')]
+    with pytest.raises(network.NetworkError, match='项目权限'):
+        a.ensure_authorized(force=True)
+    assert a.authorized_context is None
+    fake.replies = [Response(200, b'{"code":200,"data":[]}')]
+    with pytest.raises(network.NetworkError):
+        a.ensure_authorized()
+    assert len(posts(fake)) == 2

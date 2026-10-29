@@ -37,7 +37,7 @@ from .account import Account, Prepared, load_credentials, save_credentials, vali
 from .package import Package
 from .batch import Batch, Config
 from .product import PRODUCTS, SIM_ESIM
-from .esp import resource, validate_image, engine
+from .esp import resource, validate_image, preflight
 
 STYLE = """
 QWidget { font-family: "Microsoft YaHei UI", "Segoe UI"; font-size: 14px; color: #243c45; }
@@ -884,7 +884,8 @@ class Window(QMainWindow):
                 if cfg.mode != "ml":
                     cfg.image = cfg.esp_path.read_bytes()
                     validate_image(cfg.image)
-                    engine()
+                    self.bus.notice.emit("正在自检 ESP32 官方工具（不访问设备）…")
+                    preflight(cancel)
                 if cfg.mode != "esp":
                     cfg.package = Package(cfg.ml_path.read_bytes())
                     cfg.backup.mkdir(parents=True, exist_ok=True)
@@ -902,8 +903,10 @@ class Window(QMainWindow):
             except Exception:
                 if candidate:
                     candidate.close()
-                elif prepared:
-                    prepared.close()
+                else:
+                    if prepared:
+                        prepared.close()
+                    account.close()
                 raise
 
         def ready(candidate):
@@ -1127,6 +1130,7 @@ class Window(QMainWindow):
         view.setReadOnly(True)
         view.setPlainText(json.dumps(row, ensure_ascii=False, indent=2))
         l.addWidget(view)
+        l.addWidget(self.button("复制完整状态与日志", lambda: QApplication.clipboard().setText(view.toPlainText())))
         l.addWidget(self.button("关闭", dialog.accept))
         dialog.exec()
 

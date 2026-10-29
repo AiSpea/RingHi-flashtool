@@ -93,6 +93,7 @@ class Batch:
         self.execute = execute
         self.lock = threading.RLock()
         self.save_lock = threading.Lock()
+        self.scan_lock = threading.RLock()
         self.rows = []
         self.current = {}
         self.leases = {}
@@ -141,14 +142,20 @@ class Batch:
     def _scan_loop(self):
         while not self.stop_event.is_set():
             try:
-                found, hubs = self.scanner()
-                self.observe(found, hubs)
+                self.refresh_ports()
                 self.save()
             except Exception as e:
                 with self.lock:
                     self.error = "扫描或 CSV 保存失败：" + str(e)
                     self.accepting = False
             self.stop_event.wait(0.7)
+
+    def refresh_ports(self):
+        # Serialize scans so an older periodic snapshot cannot overwrite the
+        # fresh topology obtained by a recovering chip worker.
+        with self.scan_lock:
+            found, hubs = self.scanner()
+            self.observe(found, hubs)
 
     def observe(self, found, hubs):
         with self.lock:
@@ -214,6 +221,12 @@ class Batch:
             b.finish("未开始", "设备已拔出，未写入")
 
     def resolve(self, b, mode):
+        b.cancel.check()
+        with self.lock:
+            if self.current.get(b.hub) is not b or not b.state["connected"]:
+                raise Cancelled("原设备连接已变化")
+        # Both chips re-enumerate. Refresh the same physical chip before open.
+        self.refresh_ports()
         b.cancel.check()
         with self.lock:
             if self.current.get(b.hub) is not b or not b.state["connected"]:
@@ -334,7 +347,7 @@ class Batch:
                 raise errors[0]
         if cfg.mode != "ml":
             b.update(result="复位中", reason="写入与激活完成，复位 ESP32")
-            esp.reset(lambda: self.resolve(b, "esp"), c)
+            esp.reset(lambda: self.resolve(b, "esp"), c, expected=b.mac)
         if cfg.production:
             b.update(result="产测中", reason="等待设备启动")
 

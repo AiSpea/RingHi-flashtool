@@ -22,11 +22,11 @@ fi
 exit 0
 PRE
 chmod 755 "$SCRIPTS/preinstall"
-pkgbuild --root "$ROOT" --component-plist "$BUILD/components.plist" --scripts "$SCRIPTS" --identifier com.aispea.ringhi.flasher.native.pkg --version 0.4.9 --install-location / "$OUT"
+pkgbuild --root "$ROOT" --component-plist "$BUILD/components.plist" --scripts "$SCRIPTS" --identifier com.aispea.ringhi.flasher.native.pkg --version 0.4.10 --install-location / "$OUT"
 
 # Exact platform/version ZIP consumed by the native Mac updater. No resource
 # forks or links; SHA256SUMS covers both manual and in-app distributions.
-ZIP="$(dirname "$OUT")/RingHi-Native-0.4.9-mac-arm64.zip"
+ZIP="$(dirname "$OUT")/RingHi-Native-0.4.10-mac-arm64.zip"
 ditto -c -k --norsrc --keepParent "$APP" "$ZIP"
 python3 - "$OUT" "$ZIP" <<'HASH'
 from pathlib import Path

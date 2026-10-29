@@ -247,7 +247,7 @@ final class Store: ObservableObject {
         if c.mode != "ml" {
           c.esp = try Data(contentsOf: c.espURL)
           try EspEngine.validate(c.esp)
-          try EspEngine.verify()
+          try EspEngine.preflight(ct)
         }
         if c.mode != "esp" {
           c.pkg = try MLPackage(Data(contentsOf: c.mlURL))

@@ -71,6 +71,12 @@ enum EspEngine {
     let data = try Data(contentsOf: executable, options: .mappedIfSafe)
     try require(data.sha256 == hash, "官方 esptool 校验不符")
   }
+  @discardableResult static func preflight(_ ct: Cancellation) throws -> String {
+    try verify()
+    let output = try OwnedProcess.run(executable, ["version"], ct, timeout: 60)
+    try require(matches(output, "(?m)^esptool(?:\\.py)? v5\\.6\\.0\\b"), "ESP32 工具自检失败：版本未确认")
+    return output
+  }
   static func validate(_ b: Data) throws {
     try require(
       b.count == 16 * 1024 * 1024 && b[0] == 0xe9 && b.uint(12, 2) == 9,
@@ -78,7 +84,7 @@ enum EspEngine {
   }
   static func run(
     _ command: String, _ port: String, _ extra: [String], _ ct: Cancellation, timeout: Double = 180,
-    before: String = "default-reset", after: String = "no-reset", started: () -> Void = {}, line: (String) throws -> Void = { _ in }
+    before: String = "default-reset", after: String = "no-reset-stub", started: () -> Void = {}, line: (String) throws -> Void = { _ in }
   ) throws -> String {
     try verify()
     try require(port.hasPrefix("/dev/cu.") && !port.contains("\n"), "串口路径无效")

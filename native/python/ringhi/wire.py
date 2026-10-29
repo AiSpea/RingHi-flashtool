@@ -9,6 +9,10 @@ class CommandRejected(OSError):
     pass
 
 
+class PortOpenTimeout(OSError):
+    """Opening timed out; not an ambiguous identity or a protocol failure."""
+
+
 class Wire:
     def __init__(self, port, cancel: Cancel):
         self.cancel = cancel
@@ -49,31 +53,59 @@ class Wire:
         return self.serial.read(max(1, min(self.serial.in_waiting, 8192)))
 
 
+def windows_error(e):
+    code = getattr(e, "winerror", None)
+    if code is None:
+        match = re.search(r"(?:WinError\s+|None,\s*)(\d+)", str(e))
+        code = int(match[1]) if match else None
+    return code
+
+
+def port_disconnected(e):
+    # Expected only while rebooting or reopening an identity-read connection.
+    # Never use this to replay Flash writes or activation requests.
+    return windows_error(e) in (6, 31, 995, 1167)
+
+
 def transient_open(e):
     if isinstance(e, NotReady):
         return True
     if isinstance(e, Ambiguous):
         return False
-    code = getattr(e, "winerror", None)
-    if code is None:
-        match = re.search(r"(?:WinError\s+|None,\s*)(\d+)", str(e))
-        code = int(match[1]) if match else None
-    return code in (2, 3, 21, 1167)
+    return windows_error(e) in (2, 3, 5, 21, 32, 1167) or (
+        isinstance(e, serial.SerialException) and getattr(e, "errno", None) == 13
+    )
 
 
-def open_ready(resolve, cancel, status=lambda s: None, timeout=30, opener=Wire):
+def open_ready(resolve, cancel, status=lambda s: None, timeout=30, opener=Wire,
+               target="目标串口"):
     deadline = time.monotonic() + timeout
+    last_status = None
     while True:
         cancel.check()
+        path = None
         try:
-            return opener(resolve().path, cancel)
+            path = resolve().path
+            opened = opener(path, cancel)
         except Exception as e:
             if not transient_open(e):
                 raise
+            detail = "未枚举到匹配端口" if path is None else f"{path} 打开失败"
+            detail += f"；{type(e).__name__}: {e}"
             if time.monotonic() >= deadline:
-                raise OSError("目标端口驱动未就绪；请检查连接，尚未发送数据") from e
-            status("等待目标端口和驱动就绪")
+                raise PortOpenTimeout(f"{target}等待超时：{detail}") from e
+            message = f"等待{target}就绪 · {detail}"
+            if message != last_status:
+                status(message)
+                last_status = message
             cancel.sleep(0.3)
+            continue
+        try:
+            cancel.check()
+        except BaseException:
+            opened.close()
+            raise
+        return opened
 
 
 def at(wire, command, cancel, timeout=5, disconnect_ok=False):

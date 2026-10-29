@@ -5,7 +5,8 @@ from datetime import datetime
 import struct, re, time
 from . import storage
 from .storage import read_json, save_json, verified, sha, now
-from .wire import open_ready, flash_identity as identity, at
+from .wire import (open_ready, flash_identity as identity, at, PortOpenTimeout,
+                   CommandRejected, transient_open, port_disconnected)
 from .ports import NotReady
 from .protocol import Download, partition
 from .account import activate, retryable_activation, check_activation_context
@@ -102,43 +103,105 @@ def check_uid(expected, found):
 
 
 def verify_runtime(resolve, imei, cancel, status):
-    with open_ready(lambda: resolve("runtime"), cancel, status, timeout=45) as wire:
-        actual, version = identity(wire, cancel, boot_wait=20)
-    if actual != imei:
-        raise OSError("复位后 IMEI 与原设备不一致")
-    if "ringhi" not in version.lower():
-        raise OSError("复位后 RingHi 固件版本未确认")
-    return version
+    # Re-open after a boot-time disconnect, always resolving the same chip anew.
+    # Never reset/reflash or repeat an activation to repair an identity read.
+    deadline = time.monotonic() + 60
+    while True:
+        cancel.check()
+        try:
+            with open_ready(lambda: resolve("runtime"), cancel, status,
+                            timeout=max(0, min(5, deadline - time.monotonic())),
+                            target="ML307 运行 AT 口（固件/激活后的启动核验）") as wire:
+                actual, version = identity(wire, cancel)
+        except Exception as exc:
+            retry = isinstance(exc, (PortOpenTimeout, CommandRejected, TimeoutError))
+            if not (retry or transient_open(exc) or port_disconnected(exc)):
+                raise
+            if time.monotonic() >= deadline:
+                raise OSError(f"ML307 启动核验超时；已完成的写入和授权记录保留：{exc}") from exc
+            status(f"等待 ML307 启动身份就绪 · {exc}")
+            cancel.sleep(0.5)
+            continue
+        if actual != imei:
+            raise OSError("复位后 IMEI 与原设备不一致")
+        if "ringhi" not in version.lower():
+            raise OSError("复位后 RingHi 固件版本未确认")
+        return version
+
+
+class _DownloadAppeared(Exception):
+    """Abort a fallback AT open if the requested download port arrived."""
 
 
 def enter_download(resolve, imei, cancel, status):
     status("切换 ML307 下载模式")
-    with open_ready(lambda: resolve("runtime"), cancel, status) as wire:
+    with open_ready(lambda: resolve("runtime"), cancel, status,
+                    target="ML307 运行 AT 口（进入下载前）") as wire:
         current, _ = identity(wire, cancel)
         if current != imei:
             raise OSError("下载前 IMEI 改变，已停止")
         at(wire, "AT^AUTODL", cancel, timeout=3, disconnect_ok=True)
-    # Wait for actual driver readiness; do not reopen the disappearing old COM.
-    deadline = time.monotonic() + 8
+    # A mode switch can temporarily expose neither interface. Keep waiting for
+    # download instead of treating a missing old AT port as a failed download.
+    start = time.monotonic()
+    deadline = start + 45
+    fallback_attempted = False
+    last_missing = None
+    status("等待 ML307 下载口重新枚举")
     while time.monotonic() < deadline:
         cancel.check()
         try:
             resolve("download")
-            break
-        except NotReady:
-            cancel.sleep(0.2)
-    else:
-        # Some factory firmware ACKs AUTODL but stays in runtime until reset.
-        try:
-            with open_ready(
-                lambda: resolve("runtime"), cancel, status, timeout=3
-            ) as wire:
-                current, _ = identity(wire, cancel)
-                if current != imei:
-                    raise OSError("复位前 IMEI 改变")
-                at(wire, "AT^RESET=normal", cancel, timeout=3, disconnect_ok=True)
-        except NotReady:
-            pass
+            return
+        except NotReady as exc:
+            last_missing = exc
+        if not fallback_attempted and time.monotonic() - start >= 8:
+            try:
+                resolve("runtime")
+            except NotReady:
+                pass
+            else:
+                fallback_attempted = True
+
+                def remaining_runtime():
+                    try:
+                        resolve("download")
+                    except NotReady:
+                        return resolve("runtime")
+                    raise _DownloadAppeared()
+
+                try:
+                    with open_ready(remaining_runtime, cancel, status, timeout=3,
+                                    target="ML307 切换中仍存在的 AT 口") as wire:
+                        current, _ = identity(wire, cancel)
+                        if current != imei:
+                            raise OSError("复位前 IMEI 改变")
+                        status("ML307 仍在运行模式 · 确认身份后复位一次")
+                        at(wire, "AT^RESET=normal", cancel, timeout=3, disconnect_ok=True)
+                except _DownloadAppeared:
+                    return
+                except PortOpenTimeout:
+                    # AT disappeared while opening: the mode switch may be in
+                    # progress. Do not resend AUTODL or restart the whole job.
+                    pass
+                except OSError as exc:
+                    if not port_disconnected(exc):
+                        raise
+                status("等待 ML307 下载口重新枚举")
+        cancel.sleep(0.3)
+    raise PortOpenTimeout(f"ML307 下载模式切换超时；未开始新的写入：{last_missing}")
+
+
+def finish_verification(board, prior, resolve):
+    """Finish a known write/activation without acquiring another activation."""
+    board.update(imei=prior["imei"], backup=prior["backup"], mlProgress=98,
+                 mlState="写入及官方激活已完成 · 等待启动身份核验")
+    version = verify_runtime(resolve, prior["imei"], board.cancel,
+                             lambda text: board.update(mlState=text))
+    prior.update(phase="verified", versionAfter=version, verifiedAt=now())
+    save_json(Path(prior["backup"]) / "session.json", prior)
+    save_json(storage.ROOT / "ml-intents" / (prior["imei"] + ".json"), prior)
+    board.update(mlProgress=100, mlState="写入、激活与启动身份确认完成")
 
 
 def resume_activation(board, cfg, resolve, account, prepared, prior, already_download=False):
@@ -156,6 +219,9 @@ def resume_activation(board, cfg, resolve, account, prepared, prior, already_dow
         raise OSError("原授权项目、设备或备份不匹配，未恢复激活")
     check_activation_context(ledger, prior["uid"], account.project)
     original_backups(prior, cfg.package)
+    if ledger.get("stage") == "complete" and not already_download:
+        finish_verification(board, prior, resolve)
+        return
     # Confirm network readiness before switching a successfully written modem.
     account.choose_route(cancel, status)
     board.update(
@@ -166,7 +232,8 @@ def resume_activation(board, cfg, resolve, account, prepared, prior, already_dow
     )
     if not already_download:
         enter_download(resolve, prior["imei"], cancel, status)
-    with open_ready(lambda: resolve("download"), cancel, status) as wire:
+    with open_ready(lambda: resolve("download"), cancel, status,
+                    target="ML307 下载口（恢复原设备授权）") as wire:
         dl = Download(wire, cancel)
         dl.bootstrap(cfg.package)  # RAM loaders only; no erase/partition writes.
         _, raw = dl.send(18, struct.pack("<I", 0), accepted=(0x83,))
@@ -182,17 +249,19 @@ def resume_activation(board, cfg, resolve, account, prepared, prior, already_dow
                     cancel,
                     status,
                 )
-        finally:
+            prior.update(phase="awaiting-verification")
+            save_json(Path(prior["backup"]) / "session.json", prior)
+            save_json(storage.ROOT / "ml-intents" / (prior["imei"] + ".json"), prior)
+            board.update(mlProgress=97, mlState="官方激活已确认 · 正在复位 ML307")
+        except Exception:
             if not dl.broken and not cancel.event.is_set():
-                dl.reset()
-    prior.update(phase="awaiting-verification")
-    save_json(Path(prior["backup"]) / "session.json", prior)
-    save_json(storage.ROOT / "ml-intents" / (prior["imei"] + ".json"), prior)
-    version = verify_runtime(resolve, prior["imei"], cancel, status)
-    prior.update(phase="verified", versionAfter=version, verifiedAt=now())
-    save_json(Path(prior["backup"]) / "session.json", prior)
-    save_json(storage.ROOT / "ml-intents" / (prior["imei"] + ".json"), prior)
-    board.update(mlProgress=100, mlState="激活恢复与启动身份确认完成 · 未重烧固件")
+                try:
+                    dl.reset()
+                except OSError:
+                    pass
+            raise
+        dl.reset()
+    finish_verification(board, prior, resolve)
 
 
 def pending_context(board, cfg, prior, project):
@@ -282,12 +351,8 @@ def run(board, cfg, resolve, account, prepared):
                 or ledger.get("session") != prior.get("backup")
             ):
                 raise OSError("上次授权或写入结果待核对，未重复领取激活码")
-            version = verify_runtime(resolve, imei, cancel, status)
-            prior.update(phase="verified", versionAfter=version, verifiedAt=now())
-            save_json(Path(prior["backup"]) / "session.json", prior)
-            save_json(storage.ROOT / "ml-intents" / (imei + ".json"), prior)
-            board.update(imei=imei, backup=prior["backup"])
-            progress(100, "上次写入、激活和本次重启身份已确认")
+            pending_context(board, cfg, prior, account.project)
+            finish_verification(board, prior, resolve)
             return
         if prior and prior.get("phase") != "verified" and not no_flash_written(prior):
             raise OSError(
@@ -376,7 +441,8 @@ def run(board, cfg, resolve, account, prepared):
                 ("恢复 " if recovery else "") + name + f" · {n * 100 // max(1, size)}%",
             )
 
-    with open_ready(lambda: resolve("download"), cancel, status) as wire:
+    with open_ready(lambda: resolve("download"), cancel, status,
+                    target="ML307 下载口（写入前）") as wire:
         dl = Download(wire, cancel, advance)
         status("连接官方 ROM 下载器")
         dl.bootstrap(pkg)
@@ -443,9 +509,10 @@ def run(board, cfg, resolve, account, prepared):
                 except OSError:
                     pass
             raise
-        dl.reset()
         state["phase"] = "awaiting-verification"
         save()
+        progress(97, "官方激活已确认 · 正在复位 ML307")
+        dl.reset()
     progress(98, "已激活 · 等待启动身份核验")
     state["versionAfter"] = verify_runtime(resolve, imei, cancel, status)
     state["phase"] = "verified"

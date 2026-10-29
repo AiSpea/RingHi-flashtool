@@ -60,7 +60,7 @@ def check_csv_gate(window, output):
     with (
         patch.object(window, "background", background),
         patch.object(ui, "validate_image", lambda raw: None),
-        patch.object(ui, "engine", lambda: None),
+        patch.object(ui, "preflight", lambda cancel: None),
         patch.object(ui, "Package", lambda raw: object()),
         patch.object(ui, "Prepared", Prepared),
         patch.object(ui, "Batch", Batch),

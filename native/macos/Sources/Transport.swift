@@ -143,17 +143,18 @@ final class USBWire: Wire {
     try require(
       device.vendor == 0x3563 && device.product == (download ? 0x1000 : 0x2000), "ML307 USB 模式不符")
     var error = Array(repeating: CChar(0), count: 512)
+    var code: Int32 = 0
     handle = device.key.withCString {
-      rh_usb_open($0, Int32(device.product), download ? 0 : 4, &error, Int32(error.count))
+      rh_usb_open($0, Int32(device.product), download ? 0 : 4, &error, Int32(error.count), &code)
     }
-    try require(handle != nil, "无法打开 ML307 USB：" + String(cString: error))
+    if handle == nil { throw USBTransportFailure(code: code, message: "无法打开 ML307 USB：" + String(cString: error)) }
   }
   func read(_ timeout: Int, _ ct: Cancellation) throws -> Data {
     try ct.check()
     guard let handle else { throw Failure("USB 已关闭") }
     var b = Array(repeating: UInt8(0), count: 8192)
     let n = rh_usb_read(handle, &b, Int32(b.count), Int32(max(1, min(timeout, 200))))
-    try require(n >= 0, "USB 接收失败：" + String(cString: rh_usb_error(n)))
+    if n < 0 { throw USBTransportFailure(code: n, message: "USB 接收失败：" + String(cString: rh_usb_error(n))) }
     try ct.check()
     return Data(b.prefix(Int(n)))
   }
@@ -229,12 +230,12 @@ enum AT {
       }) {
         if line == "OK" { return value }
         if line == "ERROR" || line.hasPrefix("+CME ERROR:") || line.hasPrefix("+CMS ERROR:") {
-          throw Failure("设备拒绝命令：\(command)")
+          throw ATNotReady(message: "设备拒绝命令：\(command)")
         }
       }
     }
     if disconnectOK { return String(decoding: bytes, as: UTF8.self) }
-    throw Failure("AT 响应超时：\(command)")
+    throw ATNotReady(message: "AT 响应超时：\(command)")
   }
   static func imei(_ wire: Wire, _ ct: Cancellation) throws -> String {
     let value = try command(wire, "AT+CGSN=1", ct)

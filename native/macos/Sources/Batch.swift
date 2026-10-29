@@ -275,7 +275,12 @@ final class Batch {
         && $0.vendor == (role == "esp" ? 0x303a : 0x3563)
         && $0.product == (role == "esp" ? 0x1001 : download ? 0x1000 : 0x2000)
     }
-    if matches.isEmpty { throw PortNotReady(message: "目标 \(role) 接口未就绪，未打开其他接口") }
+    if matches.isEmpty {
+      let mode = role == "esp" ? "ESP32 串口" : download ? "ML307 下载口" : "ML307 运行 AT 口"
+      let current = inventory.filter { $0.key == (role == "esp" ? s.espKey : s.mlKey) }
+        .map { String(format: "USB PID 0x%04x", $0.product) }.joined(separator: ", ")
+      throw PortNotReady(message: mode + "未枚举；本芯片当前：" + (current.isEmpty ? "暂未发现" : current))
+    }
     try require(matches.count == 1, "目标 \(role) 接口不唯一，未打开其他接口")
     if role == "esp" {
       if matches[0].paths.isEmpty { throw PortNotReady(message: "目标 ESP32 串口尚未就绪") }

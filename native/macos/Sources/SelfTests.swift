@@ -305,6 +305,7 @@ enum SelfTests {
     Disk.root = URL(fileURLWithPath: "/tmp/ringhi-native-tests-" + UUID().uuidString)
     print("Isolated evidence: " + Disk.root.path)
     try UpdateTests.run()
+    try RecoveryTests.run()
     try recoveryChecks()
     try aliasRecoveryChecks()
     try connectionPoolChecks()
@@ -333,11 +334,9 @@ enum SelfTests {
     }
     try check("descriptor is 88 bytes", try MLProtocol.partition("factory", 1024).count == 88)
     try rejects("reject invalid partition") { _ = try MLProtocol.partition("../factory", 1024) }
-    let firmware = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
-      "Desktop/RingHi")
-    if FileManager.default.fileExists(atPath: firmware.path) {
-      let raw = try Data(
-        contentsOf: firmware.appendingPathComponent("RingHi-ML307H-v26.019.rhd943a9a6304d.pkg"))
+    let environment = ProcessInfo.processInfo.environment
+    if let mlPath = environment["RINGHI_TEST_ML_FIRMWARE"] {
+      let raw = try Data(contentsOf: URL(fileURLWithPath: mlPath))
       let pkg = try MLPackage(raw)
       try check(
         "real PKG project and MBL order",
@@ -348,9 +347,9 @@ enum SelfTests {
       var bad = raw
       bad[8] ^= 1
       try rejects("invalid PKG declared size") { _ = try MLPackage(bad) }
-      let bin = try Data(
-        contentsOf: firmware.appendingPathComponent("RingHi-ESP32S3-s3.142-full-erase-16MB.bin"))
-      try EspEngine.validate(bin)
+    }
+    if let espPath = environment["RINGHI_TEST_ESP_FIRMWARE"] {
+      try EspEngine.validate(Data(contentsOf: URL(fileURLWithPath: espPath)))
       try check("real ESP32 S3 image", true)
     }
     try rejects("wrong image size") { try EspEngine.validate(Data([0xe9])) }
@@ -573,9 +572,7 @@ enum SelfTests {
       _ = try OwnedProcess.run(
         URL(fileURLWithPath: "/bin/sleep"), ["5"], Cancellation(), timeout: 0.1)
     }
-    try EspEngine.verify()
-    let version = try OwnedProcess.run(
-      EspEngine.executable, ["version"], Cancellation(), timeout: 20)
+    let version = try EspEngine.preflight(Cancellation())
     try check("official bundled esptool", version.contains("5.6.0"))
     print("PASS TOTAL: \(count); no hardware opened, no cloud activation requested.")
   }

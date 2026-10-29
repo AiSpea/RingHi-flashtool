@@ -1,7 +1,17 @@
 # RingHi macOS 原生版
 
-0.4.8，Apple Silicon（arm64），最低 macOS 13。SwiftUI / AppKit 原生界面，无 Electron / WebView。
+0.4.10，Apple Silicon（arm64），最低 macOS 13。SwiftUI / AppKit 原生界面，无 Electron / WebView。
 ESP32 使用随包自带的乐鑫官方 esptool 5.6.0（自带 Python）；ML307 使用 libusb、Swift 下载协议与官方授权服务。
+
+## 0.4.10 端口切换与激活恢复
+
+- 与 Windows 0.5.14 同步 ML307 下载/运行模式等待、身份核验和授权恢复流程；只重新解析原 Hub、原芯片、原连接代次，不跨板寻找端口。
+- 切换期间允许旧 AT 接口消失；只有原运行接口仍在且身份一致时才执行一次后备复位。错误区分下载口、运行口和系统打开失败。
+- 复位后等待回执或 libusb 设备断开，再重新打开运行接口核验 IMEI 与固件；断开本身不代表成功。已完成的写入和激活先持久保存，后续可以只补做启动核验。
+- 97% 显示复位，98% 显示启动核验；产测、云端登记及最终报告上传仍必须全部确认。
+- ESP32 步骤间使用官方 `no-reset-stub` 保持下载助手，避免无意退回 ROM；新批次在打开设备之前运行工具版本自检。版本自检允许最多 60 秒，支持取消；不修改系统安全验证。
+
+本次 Mac 完成软件及窗口验证，未进行 Mac 实物烧录；具体证据和限制见 `VALIDATION-0.4.10.md`。
 
 ## 产品类型
 
@@ -49,7 +59,7 @@ Xcode Swift 6.3.3（Swift 5 语言模式），目标 `arm64-apple-macos13.0`。
 
 ```
 ./native/macos/build.sh
-./native/macos/package.sh /absolute/path/RingHi-Native-0.4.9-mac-arm64.pkg
+./native/macos/package.sh /absolute/path/RingHi-Native-0.4.10-mac-arm64.pkg
 ```
 
 产物默认放在 `/private/tmp/ringhi-native-macos-build.noindex`，避开同步目录给 `.app` 添加 FinderInfo 导致的签名失败。
@@ -63,6 +73,7 @@ Xcode Swift 6.3.3（Swift 5 语言模式），目标 `arm64-apple-macos13.0`。
 ```
 
 自检创建独立 `/tmp/ringhi-native-tests-*`，不打开硬件、不登录、不激活。测试进程组终止时需正常 macOS 权限，否则终端沙箱可能限制发送信号。
+可通过 `RINGHI_TEST_ML_FIRMWARE`、`RINGHI_TEST_ESP_FIRMWARE` 指定实际 PKG/BIN 进行只读格式验证，不再依赖桌面固定文件名。
 `--ui-test` 仅用于开发窗口验证，数据明确标记为软件验证，并存入隔离临时目录；正常启动没有模拟设备或演练入口。
 
 ## 批次授权准备
@@ -91,7 +102,7 @@ Xcode Swift 6.3.3（Swift 5 语言模式），目标 `arm64-apple-macos13.0`。
 验证命令（不打开硬件、不调用授权）：
 
 ```sh
-'/path/to/RingHi Flasher.app/Contents/MacOS/RingHi Flasher' --verify-update-archive /path/to/RingHi-Native-0.4.9-mac-arm64.zip
+'/path/to/RingHi Flasher.app/Contents/MacOS/RingHi Flasher' --verify-update-archive /path/to/RingHi-Native-0.4.10-mac-arm64.zip
 RINGHI_CHECK_FROM_VERSION=0.4.8 '/path/to/RingHi Flasher.app/Contents/MacOS/RingHi Flasher' --check-mac-update
 ```
 

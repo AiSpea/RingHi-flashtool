@@ -87,7 +87,7 @@ enum UpdateTests {
     let csv = root.appendingPathComponent("Documents/production.csv"), config = root.appendingPathComponent("Support/settings.json")
     try Disk.atomic(csv, Data("device,result\nTEST,success\n".utf8)); try Disk.atomic(config, Data("private-config-fixture".utf8))
     let originalCSV = try Data(contentsOf: csv), originalConfig = try Data(contentsOf: config)
-    let plan = UpdatePlan(source: source, destination: destination, version: "0.4.9", parent: getpid(), token: UUID().uuidString)
+    let plan = UpdatePlan(source: source, destination: destination, version: Disk.version, parent: getpid(), token: UUID().uuidString)
     var verifications = 0
     try SelfTests.rejects("post-swap verification rolls back old app") {
       try UpdateInstaller.replace(plan) { _ in verifications += 1; if verifications == 2 { throw Failure("Injected verification failure") } }

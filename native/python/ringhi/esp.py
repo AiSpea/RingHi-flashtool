@@ -1,5 +1,6 @@
-import os, sys, re, subprocess, time, threading, queue
+import sys, re, subprocess, time, threading, queue
 from pathlib import Path
+from contextlib import contextmanager
 import psutil
 from .storage import sha
 
@@ -60,6 +61,34 @@ def kill_tree(p):
         raise OSError("烧录子进程未能退出，端口仍锁定，停止接收新板")
 
 
+
+_port_locks = {}
+_port_locks_guard = threading.Lock()
+
+
+@contextmanager
+def port_lease(port, cancel):
+    # Serialize only this port, including child cleanup. Other boards stay parallel.
+    with _port_locks_guard:
+        lock = _port_locks.setdefault(port, threading.Lock())
+    while not lock.acquire(timeout=0.1):
+        cancel.check()
+    try:
+        cancel.check()
+        yield
+    finally:
+        lock.release()
+
+
+class ToolFailure(OSError):
+    def __init__(self, message, output):
+        super().__init__(message)
+        self.output = output
+
+
+class PortCleanupError(OSError):
+    pass
+
 def run(
     port,
     command,
@@ -67,7 +96,7 @@ def run(
     cancel,
     log=lambda s: None,
     timeout=90,
-    after="no-reset",
+    after="no-reset-stub",
     baud=460800,
     before="default-reset",
 ):
@@ -81,6 +110,8 @@ def run(
         "esp32s3",
         "--port",
         port,
+        "--connect-attempts",
+        "2",
         "--baud",
         str(baud),
         "--before",
@@ -89,21 +120,31 @@ def run(
         after,
         command,
     ] + list(args)
-    p = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"},
-    )
-    from .process_job import Job
+    with port_lease(port, cancel):
+        return execute(cmd, cancel, log, timeout)
 
+
+def preflight(cancel):
+    """Check the bundled engine in its real launch environment, without a port."""
+    text = execute([str(engine()), "version"], cancel, timeout=30)
+    if not re.search(r"(?m)^esptool(?:\.py)? v5\.6\.0\b", text):
+        raise OSError("ESP32 工具自检失败：未返回预期的 esptool 5.6.0 版本")
+    return text
+
+
+def execute(cmd, cancel, log=lambda s: None, timeout=90):
+    from .process_job import launch
+
+    cancel.check()
     try:
-        job = Job(p)
-    except Exception:
-        kill_tree(p)
-        raise
+        p, job = launch(cmd)
+    except (OSError, psutil.Error) as exc:
+        code = (getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+                or type(exc).__name__)
+        raise OSError(
+            f"ESP32 工具启动失败（系统错误 {code}）：{exc}。"
+            "尚未连接芯片；请检查工具文件是否被安全软件隔离、安装目录权限。"
+        ) from exc
     q = queue.Queue()
     out = []
 
@@ -133,7 +174,7 @@ def run(
         while not ended:
             cancel.check()
             if time.monotonic() > deadline:
-                raise TimeoutError("ESP32 官方工具执行超时")
+                raise ToolFailure("ESP32 官方工具执行超时", "\n".join(out))
             try:
                 line = q.get(timeout=0.1)
             except queue.Empty:
@@ -148,14 +189,20 @@ def run(
         code = p.wait(timeout=5)
         text = "\n".join(out)
         if code:
-            raise OSError("ESP32 官方工具失败：" + "\n".join(out[-12:]))
+            raise ToolFailure(f"ESP32 官方工具失败（退出码 {code} / 0x{code & 0xffffffff:08X}）："
+                          + ("\n".join(out[-12:]) or "进程未输出诊断，请检查安全软件拦截记录和安装文件。"), text)
         return text
     finally:
-        job.close()
-        if p.poll() is None:
-            kill_tree(p)
-        p.stdout.close()
-        reader.join(timeout=2)
+        try:
+            job.close()
+            if p.poll() is None:
+                kill_tree(p)
+            p.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise PortCleanupError("ESP32 子进程占用尚未释放，未启动下一次串口操作") from exc
+        finally:
+            p.stdout.close()
+            reader.join(timeout=2)
 
 
 def parse_identity(text):
@@ -169,40 +216,77 @@ def parse_identity(text):
     return m[1].upper()
 
 
-def identify(resolve, cancel, status=lambda text: None):
-    from .ports import NotReady
+def recoverable(exc):
+    from .ports import NotReady, Ambiguous
+    if isinstance(exc, (PortCleanupError, Ambiguous)):
+        return False
+    if isinstance(exc, NotReady):
+        return True
+    text = str(exc) + "\n" + getattr(exc, "output", "")
+    if "工具启动失败" in text or "SHA-256" in text:
+        return False
+    return any(term in text for term in (
+        "Could not open COM", "ClearCommError failed", "PermissionError",
+        "A serial exception error occurred", "Failed to connect",
+        "Write timeout", "write timeout", "Cannot configure port",
+        "GetOverlappedResult", "device does not recognize", "No serial data received",
+        "Packet content transfer stopped", "SerialException",
+    )) or isinstance(exc, ToolFailure) and "执行超时" in str(exc)
 
-    # Only flash-id is retried: it reads identity and loads the RAM stub, never
-    # writes flash. Re-resolve the same hub/chip after USB re-enumeration.
-    before = "default-reset"
-    for attempt in range(4):
+
+def wait_port(resolve, cancel, status, seconds=20):
+    from .ports import NotReady
+    deadline = time.monotonic() + seconds
+    while True:
+        cancel.check()
         try:
-            status(
-                "读取 MAC 与 Flash 容量"
-                if not attempt
-                else f"等待 USB 下载口恢复 · {attempt + 1}/4"
-            )
-            return parse_identity(
-                run(resolve().path, "flash-id", [], cancel, timeout=30, before=before)
-            )
-        except OSError as e:
-            text = str(e)
-            unopened = isinstance(e, NotReady) or (
-                "Could not open COM" in text
-                and not re.search("Connecting|Connected to|Writing at", text)
-            )
-            reset_disconnect = (
-                "ClearCommError failed" in text
-                or "A serial exception error occurred" in text
-                or "Failed to connect" in text
-            )
-            if not (unopened or reset_disconnect) or attempt == 3:
+            return resolve()
+        except NotReady as exc:
+            if time.monotonic() >= deadline:
+                raise OSError("ESP32 下载口在等待后仍未出现，请检查 USB 连接或驱动") from exc
+            status("等待同一块板的 USB 串口重新枚举…")
+            cancel.sleep(0.35)
+
+
+def identify(resolve, cancel, status=lambda text: None, *, expected=None,
+             before="default-reset", log=lambda text: None):
+    modes = (before, "no-reset", "usb-reset", "no-reset", "default-reset", "no-reset")
+    for attempt, mode in enumerate(modes):
+        cancel.check()
+        status("读取 MAC 与 Flash 容量" if not attempt else
+               f"自动恢复 ESP32 连接 · {attempt + 1}/{len(modes)} · {mode}")
+        try:
+            port = wait_port(resolve, cancel, status)
+            text = run(port.path, "flash-id", [], cancel, log=log,
+                       timeout=20, before=mode)
+            mac = parse_identity(text)
+            if expected and mac != expected:
+                raise OSError("ESP32 MAC 与本轮设备不一致，已停止恢复，未继续写入")
+            return mac
+        except OSError as exc:
+            if not recoverable(exc) or attempt == len(modes) - 1:
                 raise
-            # A reset can invalidate Windows' open CDC handle. First reopen
-            # without resetting again; only then try the official USB reset.
-            if not unopened:
-                before = "usb-reset" if before == "no-reset" else "no-reset"
+            # run() has joined its own process tree before retrying. Never kill
+            # another application's process to take its serial port.
+            log(f"ESP32 连接恢复 {attempt + 1}: {exc}")
+            status("正在释放本工具占用并等待串口恢复；其他串口软件需先关闭")
             cancel.sleep(1)
+
+
+def read_operation(resolve, command, args, cancel, status, log, timeout,
+                   expected=None, after="no-reset-stub"):
+    # Verification is read-only. Recovery can re-enter ROM but cannot reflash.
+    for attempt in range(3):
+        try:
+            port = wait_port(resolve, cancel, status)
+            return run(port.path, command, args, cancel, log, timeout,
+                       before="no-reset", after=after)
+        except OSError as exc:
+            if not recoverable(exc) or attempt == 2:
+                raise
+            log(f"ESP32 {command} 连接恢复: {exc}")
+            identify(resolve, cancel, status, expected=expected, before="no-reset", log=log)
+
 
 
 def write_verified(text):
@@ -244,27 +328,37 @@ def flash(resolve, file, raw, mac, cancel, progress, log):
         "0x0",
         str(file),
     ]
-    result = run(
-        resolve().path, "write-flash", options, cancel, output, 600, before="no-reset"
-    )
+    # A fresh port lookup also checks this board's connection generation.
+    # Re-issue write-flash ONLY when the official tool explicitly failed to open
+    # or synchronize, before it could begin an erase/write command.
+    for attempt in range(3):
+        try:
+            port = wait_port(resolve, cancel, lambda s: progress(0, s))
+            result = run(port.path, "write-flash", options, cancel, output,
+                         600, before="no-reset")
+            break
+        except OSError as exc:
+            text = str(exc) + "\n" + getattr(exc, "output", "")
+            preconnect = ("Could not open COM" in text or "Failed to connect" in text)
+            started = re.search(r"Connected to|Stub running|Stub flasher running|"
+                                r"Flash will be erased|Erasing|Writing at|Wrote ", text)
+            if not recoverable(exc) or not preconnect or started or attempt == 2:
+                raise
+            log(f"ESP32 尚未开始写入，恢复下载连接: {exc}")
+            identify(resolve, cancel, lambda s: progress(0, s), expected=mac,
+                     before="no-reset", log=log)
     if not write_verified(result):
         raise OSError("未确认完整 16 MB 写入与 MD5，未判定成功")
     progress(97, "独立复核完整 16 MB MD5")
-    verified = run(
-        resolve().path, "verify-flash", options, cancel, log, 120, before="no-reset"
+    verified = read_operation(
+        resolve, "verify-flash", options, cancel, lambda s: progress(97, s),
+        log, 120, expected=mac,
     )
     if not digest_verified(verified):
         raise OSError("完整 Flash MD5 未确认一致")
     progress(100, "完整 MD5 校验通过 · esptool 5.6.0")
 
 
-def reset(resolve, cancel):
-    run(
-        resolve().path,
-        "read-mac",
-        [],
-        cancel,
-        timeout=45,
-        after="hard-reset",
-        before="no-reset",
-    )
+def reset(resolve, cancel, expected=None):
+    read_operation(resolve, "read-mac", [], cancel, lambda s: None,
+                   lambda s: None, 45, expected=expected, after="hard-reset")

@@ -273,8 +273,25 @@ final class Download {
   func write(_ name: String, _ b: Data) throws {
     try image(MLProtocol.partition(name, UInt64(b.count)), b, "写入 " + name, chunk: 256)
   }
-  func reset() throws {
+  @discardableResult
+  func reset(timeout: Double = 3) throws -> Bool {
     try require(!broken, "下载已中断，不能确认复位")
     try wire.write(MLProtocol.frame(16, Data.le(0, 4), crc: false), ct)
+    let end = ProcessInfo.processInfo.systemUptime + timeout
+    var bytes = Data()
+    while ProcessInfo.processInfo.systemUptime < end {
+      try ct.check()
+      do { bytes.append(try wire.read(200, ct)) }
+      catch let e as USBTransportFailure where e.code == -4 {
+        // A reset disconnect is expected; only runtime identity proves boot.
+        return false
+      }
+      try require(bytes.count <= 65546, "复位回包过大")
+      if let reply = try MLProtocol.decode(bytes, crc: false) {
+        try require(reply.0 == 0x80, "复位命令被拒绝")
+        return true
+      }
+    }
+    return false
   }
 }

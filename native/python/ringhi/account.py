@@ -107,6 +107,24 @@ class Account:
         self.authorized_context = None
 
     def call(self, action, body=None, *, cancel=None, status=lambda s: None):
+        token = self.token
+        try:
+            return self._call(action, body, cancel=cancel, status=status)
+        except NetworkError as exc:
+            if exc.category != "session" or exc.delivery != "response":
+                raise
+            # An explicit authentication rejection is not an ambiguous delivery.
+            # Refresh once, on demand, without polling permissions for each board.
+            if self.token == token:
+                self.authorized_context = None
+            if action in ("login", "projects") or not (
+                self.username and self.project > 0 and token
+            ):
+                raise
+            self.ensure_authorized(cancel, status)
+            return self._call(action, body, cancel=cancel, status=status)
+
+    def _call(self, action, body=None, *, cancel=None, status=lambda s: None):
         headers = {
             "Client": "PC",
             "Accept": "application/json",
@@ -198,8 +216,8 @@ class Account:
         self.authorized_at = time.monotonic()
 
     def ensure_authorized(self, cancel=None, status=lambda s: None, *, force=False):
-        # Refresh only after a read-only query explicitly rejects the session.
-        # Serialize refresh so concurrent boards do not compete to log in.
+        # Prepared batch permission is bound to this account/project/token, not
+        # to a timer. Serialize refresh after an explicit session rejection.
         cancel = cancel or Cancel()
         cancel.check()
         while not self.auth_lock.acquire(timeout=0.1):
@@ -209,11 +227,11 @@ class Account:
             if (
                 not force
                 and self.authorized_context == (self.token, self.project, self.username)
-                and time.monotonic() - self.authorized_at < 60
             ):
                 if cancel:
                     cancel.check()
                 return
+            self.authorized_context = None
             try:
                 data = self.call("projects", cancel=cancel, status=status)
             except NetworkError as exc:
@@ -250,6 +268,7 @@ class Account:
         self.transport.release_current()
 
     def close(self):
+        self.authorized_context = None
         self.transport.close()
 
     def login(self, creds):

@@ -89,8 +89,8 @@ enum MLRecovery {
     var version = ""
     var runtime: USBDevice?
     do { runtime = try resolve("ml", false) } catch is PortNotReady { _ = try resolve("ml", true) }
-    if let runtime {
-      let wire = try USBWire(runtime, download: false); defer { wire.close() }
+    if runtime != nil {
+      let wire = try MLConnection.openUSB(resolve, download: false, ct: b.ct); defer { wire.close() }
       let identity = try DeviceIdentity.flashIdentity(wire, b.ct)
       version = identity.1
       b.change { $0.imei = identity.0 }
@@ -126,19 +126,17 @@ enum MLRecovery {
     try validateBackups(prior, pkg)
     let backup = URL(fileURLWithPath: text(prior, "backup"))
     b.change { $0.backup = backup.path; $0.mlProgress = 92; $0.mlState = "恢复同设备授权 · 保留已写固件和原备份" }
-    if (try? resolve("ml", true)) == nil {
-      let at = try USBWire(resolve("ml", false), download: false); defer { at.close() }
-      try require(try DeviceIdentity.flashIdentity(at, ct).0 == text(prior, "imei"), "恢复前设备身份不一致")
-      _ = try AT.command(at, "AT^AUTODL", ct, timeout: 3, disconnectOK: true)
-      at.close()
-      try ct.sleep(2)
-      if (try? resolve("ml", true)) == nil {
-        let again = try USBWire(resolve("ml", false), download: false); defer { again.close() }
-        try require(try DeviceIdentity.flashIdentity(again, ct).0 == text(prior, "imei"), "复位前设备身份不一致")
-        _ = try AT.command(again, "AT^RESET=normal", ct, timeout: 3, disconnectOK: true)
-      }
+    var alreadyDownload = false
+    do { _ = try resolve("ml", false) }
+    catch is PortNotReady { _ = try resolve("ml", true); alreadyDownload = true }
+    if text(record, "stage") == "complete" && !alreadyDownload {
+      try finishVerification(b, prior, resolve)
+      return
     }
-    let wire = try USBWire(BoardFlow.wait(ct, timeout: 25) { try resolve("ml", true) }, download: true)
+    if !alreadyDownload {
+      try MLConnection.enterDownload(resolve, imei: text(prior, "imei"), ct: ct) { value in b.change { $0.mlState = value } }
+    }
+    let wire = try MLConnection.openUSB(resolve, download: true, ct: ct) { value in b.change { $0.mlState = value } }
     defer { wire.close() }
     let dl = Download(wire, ct)
     try dl.bootstrap(pkg) // RAM loaders only: no erase or firmware partition writes.
@@ -148,23 +146,34 @@ enum MLRecovery {
       if text(record, "stage") != "complete" {
         try auth.run(dl, uid, backup) { value in b.change { $0.mlState = "恢复授权：" + value } }
       }
-      try dl.reset()
     } catch {
-      if !dl.broken && !ct.cancelled { try? dl.reset() }
+      if !dl.broken && !ct.cancelled { _ = try? dl.reset() }
       throw error
     }
-    wire.close()
     var state = prior
-    func save() throws {
-      try Disk.save(backup.appendingPathComponent("session.json"), state)
-      try Disk.save(Disk.root.appendingPathComponent("ml-intents/\(text(prior, "imei")).json"), state)
+    state["phase"] = "awaiting-verification"
+    try saveState(state)
+    b.change { $0.mlProgress = 97; $0.mlState = "官方激活已确认 · 正在复位 ML307" }
+    try dl.reset()
+    wire.close()
+    try finishVerification(b, state, resolve)
+  }
+  static func saveState(_ state: Object) throws {
+    try Disk.save(URL(fileURLWithPath: text(state, "backup")).appendingPathComponent("session.json"), state)
+    try Disk.save(Disk.root.appendingPathComponent("ml-intents/\(text(state, "imei")).json"), state)
+  }
+  static func finishVerification(_ b: Board, _ prior: Object,
+    _ resolve: (String, Bool) throws -> USBDevice) throws {
+    try finishVerification(b, prior) {
+      try MLConnection.verifyRuntime(resolve, imei: text(prior, "imei"), ct: b.ct) { value in b.change { $0.mlState = value } }
     }
-    state["phase"] = "awaiting-verification"; try save()
-    let runtime = try BoardFlow.wait(ct, timeout: 45) { try resolve("ml", false) }
-    let at = try USBWire(runtime, download: false); defer { at.close() }
-    let identity = try DeviceIdentity.flashIdentity(at, ct)
-    try require(identity.0 == text(prior, "imei") && identity.1.lowercased().contains("ringhi"), "激活恢复后身份或固件未确认")
-    state["phase"] = "verified"; state["versionAfter"] = identity.1; try save()
-    b.change { $0.mlProgress = 100; $0.mlState = "激活恢复与启动身份确认完成 · 未重烧固件" }
+  }
+  static func finishVerification(_ b: Board, _ prior: Object, confirm: () throws -> String) throws {
+    b.change { $0.mlProgress = 98; $0.backup = text(prior, "backup"); $0.mlState = "写入及官方激活已完成 · 等待启动身份核验" }
+    let version = try confirm()
+    var state = prior
+    state["phase"] = "verified"; state["versionAfter"] = version; state["verifiedAt"] = timestamp()
+    try saveState(state)
+    b.change { $0.mlProgress = 100; $0.mlState = "写入、激活与启动身份确认完成" }
   }
 }

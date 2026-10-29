@@ -4,7 +4,7 @@
 #include <stddef.h>
 typedef struct { char key[64],parent[64]; int vendor,product,kind,address; } RHDevice;
 int rh_usb_scan(RHDevice *devices,int capacity,char *error,int error_size);
-void *rh_usb_open(const char *key,int product,int interface_number,char *error,int error_size);
+void *rh_usb_open(const char *key,int product,int interface_number,char *error,int error_size,int *error_code);
 int rh_usb_read(void *wire,unsigned char *data,int capacity,int timeout);
 int rh_usb_write(void *wire,const unsigned char *data,int size);
 void rh_usb_close(void *wire);

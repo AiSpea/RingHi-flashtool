@@ -42,7 +42,10 @@ class Port:
 def select(ports, hub, chip, mode):
     matches = [p for p in ports if p.hub == hub and p.chip == chip and p.mode == mode]
     if not matches:
-        raise NotReady("目标串口尚未就绪")
+        observed = ", ".join(
+            f"{p.path}/{p.mode}" for p in ports if p.hub == hub and p.chip == chip
+        ) or "无"
+        raise NotReady(f"需要 {mode} 端口，当前同芯片端口：{observed}")
     if len(matches) != 1:
         raise Ambiguous("同一芯片出现多个目标串口，未尝试其他设备")
     return matches[0]
